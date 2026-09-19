@@ -1,17 +1,17 @@
 """
 LeadRescue AI — FastAPI Application Entry Point
-
-Phase 1: Foundation only. Business logic endpoints are not yet implemented.
 """
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
 
+from app.api.router import api_router
+
 app = FastAPI(
     title="LeadRescue AI",
     description="AI-powered lead rescue system for SMBs",
-    version="0.1.0",
+    version="0.2.0",
 )
 
 # CORS middleware for frontend communication
@@ -23,6 +23,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Include API Router
+app.include_router(api_router)
+
 
 @app.get("/health")
 async def health_check():
@@ -30,7 +33,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "leadrescue-ai",
-        "phase": "foundation",
+        "phase": "backend_foundation",
     }
 
 

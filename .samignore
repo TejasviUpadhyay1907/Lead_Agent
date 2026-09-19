@@ -1,0 +1,9 @@
+backend/.venv/
+backend/venv/
+backend/__pycache__/
+backend/tests/
+backend/test_output.txt
+frontend/
+.venv/
+.aws-sam/
+.git/
