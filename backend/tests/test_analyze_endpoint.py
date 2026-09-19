@@ -13,9 +13,8 @@ def test_analyze_lead_endpoint_integration():
     Test POST /api/leads/{id}/analyze:
     1. Creates lead.
     2. Invokes POST /api/leads/{id}/analyze.
-    3. Verifies AI understanding fields are saved and lifecycle_status is 'analyzed'.
-    4. Verifies score, priority, and risk_status REMAIN NULL (Phase 4 scope).
-    5. Verifies audit event 'lead_analyzed' is recorded.
+    3. Verifies AI understanding AND PolicyEngine deterministic decision fields (score=93, priority=HOT, lifecycle_status=analyzed).
+    4. Verifies audit event 'lead_analyzed' is recorded with score details.
     """
     # 1. Create Lead
     create_res = client.post(
@@ -36,7 +35,7 @@ def test_analyze_lead_endpoint_integration():
     assert analyze_res.status_code == 200
     data = analyze_res.json()
 
-    # 3. Assert AI Fields Persisted & Lifecycle Updated
+    # 3. Assert AI Understanding Fields Persisted
     assert data["intent"] == "purchase"
     assert data["urgency"] == "high"
     assert data["product"] == "CNC machines"
@@ -46,12 +45,13 @@ def test_analyze_lead_endpoint_integration():
     assert data["recommended_action"] is not None
     assert data["response_draft"] is not None
     assert data["response_status"] == "draft"
-    assert data["lifecycle_status"] == "analyzed"
 
-    # 4. Assert Deterministic Fields REMAIN NULL
-    assert data["score"] is None
-    assert data["priority"] is None
+    # 4. Assert PolicyEngine Deterministic Fields
+    assert data["score"] == 93
+    assert data["priority"] == "HOT"
+    assert data["lifecycle_status"] == "analyzed"
     assert data["risk_status"] == "normal"
+    assert data["at_risk_at"] is not None
 
     # 5. Assert Audit Event 'lead_analyzed' Recorded
     audit_res = client.get(f"/api/leads/{lead_id}/audit")

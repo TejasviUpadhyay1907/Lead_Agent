@@ -1,17 +1,20 @@
 """
 LeadRescue AI — Leads API Endpoints
-Endpoints for lead creation, listing, detailed retrieval, and AI analysis.
+Endpoints for lead creation, listing, detailed retrieval, and AI analysis + deterministic policy evaluation.
 """
 
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.agent.lead_agent import LeadRescueAgent
-from app.api.deps import get_audit_repo, get_leads_repo
+from app.api.deps import get_audit_repo, get_config_repo, get_followups_repo, get_leads_repo
 from app.models.audit import AuditEventCreate
 from app.models.enums import LifecycleStatusEnum, PriorityEnum, ResponseStatusEnum, RiskStatusEnum, SourceEnum
 from app.models.lead import Lead, LeadCreate
+from app.policy.engine import PolicyEngine
 from app.repositories.audit import AuditRepository
+from app.repositories.config import ConfigRepository
+from app.repositories.followups import FollowUpsRepository
 from app.repositories.leads import LeadsRepository
 
 router = APIRouter(prefix="/leads", tags=["Leads"])
@@ -92,14 +95,16 @@ async def get_lead(
 async def analyze_lead(
     lead_id: str,
     leads_repo: LeadsRepository = Depends(get_leads_repo),
+    followups_repo: FollowUpsRepository = Depends(get_followups_repo),
     audit_repo: AuditRepository = Depends(get_audit_repo),
+    config_repo: ConfigRepository = Depends(get_config_repo),
 ):
     """
-    Invoke Strands Agent to understand and extract details for a lead.
+    Invoke Strands Agent for understanding + Deterministic Policy Engine for decisions.
     
-    CRITICAL ARCHITECTURE BOUNDARY:
-    - AI agent extracts intent, urgency, product, quantity, location, customer stage, key entities, summary, recommendation, and response draft.
-    - AI agent DOES NOT score, assign priority (HOT/WARM/COLD), calculate risk, schedule follow-ups, or mutate state.
+    ARCHITECTURE SEPARATION:
+    1. Strands Agent -> Understands (AgentAnalysisResult).
+    2. Policy Engine -> Decides score, priority, risk, lifecycle, and follow-up.
     """
     lead = leads_repo.get_by_id(lead_id)
     if not lead:
@@ -108,11 +113,15 @@ async def analyze_lead(
             detail=f"Lead with ID '{lead_id}' not found",
         )
 
-    # Invoke Strands Agent Runner
+    # Fetch configuration & existing follow-ups
+    business_rules = config_repo.get_config("business_rules").config_value
+    existing_followups = followups_repo.list_followups(lead_id=lead_id)
+
+    # 1. AI Understanding Layer (Strands Agent)
     agent_runner = LeadRescueAgent()
     analysis_result, execution_events = agent_runner.analyze_lead(lead_id)
 
-    # Persist ONLY AI Understanding Fields (No score, priority, risk, or follow-ups)
+    # Update AI Understanding Fields
     lead.intent = analysis_result.intent
     lead.urgency = analysis_result.urgency
     lead.product = analysis_result.product
@@ -125,25 +134,49 @@ async def analyze_lead(
     lead.response_draft = analysis_result.response_draft
     lead.response_status = ResponseStatusEnum.DRAFT
 
-    # Update lifecycle status to ANALYZED (unless already opted_out)
-    if lead.lifecycle_status != LifecycleStatusEnum.OPTED_OUT:
-        lead.lifecycle_status = LifecycleStatusEnum.ANALYZED
+    # 2. Deterministic Decision Layer (Policy Engine)
+    policy_res = PolicyEngine.evaluate(
+        lead=lead,
+        analysis=analysis_result,
+        business_rules=business_rules,
+        existing_followups=existing_followups,
+    )
 
-    # Save updated lead
+    # Update Deterministic Decision Fields
+    if policy_res.score_result:
+        lead.score = policy_res.score_result.total_score
+        lead.score_breakdown = policy_res.score_result.score_breakdown
+    else:
+        lead.score = None
+        lead.score_breakdown = {}
+
+    lead.priority = policy_res.priority
+    lead.lifecycle_status = policy_res.lifecycle_status
+    lead.risk_status = policy_res.risk_status
+    lead.at_risk_at = policy_res.at_risk_at
+
+    # Create Follow-up if recommended by policy engine
+    if policy_res.followup_recommendation:
+        followups_repo.create(policy_res.followup_recommendation)
+
+    # Save lead
     saved_lead = leads_repo.save(lead)
 
-    # Record Audit Event
+    # Record Audit Trail Event
     audit_repo.create(
         AuditEventCreate(
             lead_id=lead_id,
             action="lead_analyzed",
-            actor="agent",
+            actor="policy_engine",
             details={
                 "intent": analysis_result.intent.value,
                 "urgency": analysis_result.urgency.value,
-                "product": analysis_result.product,
-                "quantity": analysis_result.quantity,
-                "events_count": len(execution_events),
+                "score": lead.score,
+                "priority": lead.priority.value if lead.priority else None,
+                "risk_status": lead.risk_status.value,
+                "lifecycle_status": lead.lifecycle_status.value,
+                "followup_created": bool(policy_res.followup_recommendation),
+                "audit_notes": policy_res.audit_notes,
             },
         )
     )
