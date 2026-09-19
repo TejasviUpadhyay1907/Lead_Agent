@@ -1,0 +1,9 @@
+fastapi
+mangum
+pydantic
+pydantic-settings
+python-dotenv
+boto3
+strands-agents
+strands-agents-tools
+uvicorn

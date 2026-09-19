@@ -1,0 +1,173 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  LeadRescue AI — AI-powered lead rescue system for SMBs.
+  WeMakeDevs x AWS First Commit — Bharat Builds Tour 2026.
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 60
+    MemorySize: 512
+    Environment:
+      Variables:
+        DEMO_MODE: "true"
+
+Parameters:
+  BedrockModelId:
+    Type: String
+    Description: Active Bedrock foundation model ID
+    # Set during deployment — do not hardcode an EOL model
+    Default: ""
+
+Resources:
+  # ============================================================
+  # Lambda Function — Backend API
+  # ============================================================
+  LeadRescueFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/
+      Handler: app.main.handler
+      Description: LeadRescue AI backend API
+      Environment:
+        Variables:
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+          LEADS_TABLE: !Ref LeadsTable
+          FOLLOWUPS_TABLE: !Ref FollowupsTable
+          AUDIT_TABLE: !Ref AuditTable
+          CONFIG_TABLE: !Ref ConfigTable
+      Policies:
+        # DynamoDB — least privilege, scoped to project tables
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LeadsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FollowupsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AuditTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConfigTable
+        # Bedrock — invoke model permission
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource: "*"
+      Events:
+        ApiProxy:
+          Type: Api
+          Properties:
+            Path: /{proxy+}
+            Method: ANY
+        ApiRoot:
+          Type: Api
+          Properties:
+            Path: /
+            Method: ANY
+
+  # ============================================================
+  # DynamoDB Tables — PAY_PER_REQUEST (free-tier friendly)
+  # ============================================================
+  LeadsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: leadrescue-leads
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: lead_id
+          AttributeType: S
+        - AttributeName: lifecycle_status
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: lead_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: status-index
+          KeySchema:
+            - AttributeName: lifecycle_status
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  FollowupsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: leadrescue-followups
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: followup_id
+          AttributeType: S
+        - AttributeName: lead_id
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: due_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: followup_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: lead-index
+          KeySchema:
+            - AttributeName: lead_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: status-due-index
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: due_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  AuditTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: leadrescue-audit
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: audit_id
+          AttributeType: S
+        - AttributeName: lead_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: audit_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: lead-timestamp-index
+          KeySchema:
+            - AttributeName: lead_id
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  ConfigTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: leadrescue-config
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: config_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: config_key
+          KeyType: HASH
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+  LeadRescueFunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt LeadRescueFunction.Arn
