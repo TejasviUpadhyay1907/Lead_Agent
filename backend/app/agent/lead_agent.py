@@ -6,6 +6,7 @@ and execution observability.
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
 
@@ -31,6 +32,29 @@ def is_aws_credentials_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def _extract_json_dict(text: str) -> Dict[str, Any]:
+    """Finds and parses the first valid JSON dict matching AgentAnalysisResult schema."""
+    # Find all JSON block matches using regex
+    json_blocks = re.findall(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, re.DOTALL)
+    
+    # Try parsing each match
+    for block in reversed(json_blocks):
+        try:
+            d = json.loads(block)
+            if isinstance(d, dict) and ("intent" in d or "summary" in d or "response_draft" in d):
+                return d
+        except Exception:
+            continue
+            
+    # Direct fallback parsing
+    json_start = text.find("{")
+    json_end = text.rfind("}") + 1
+    if json_start != -1 and json_end > json_start:
+        return json.loads(text[json_start:json_end])
+        
+    return json.loads(text)
 
 
 class LeadRescueAgent:
@@ -95,19 +119,33 @@ class LeadRescueAgent:
                     tools=self.tools,
                     system_prompt=self.system_prompt,
                 )
-                prompt_msg = f"Analyze lead '{lead_id}' using read-only tools and output analysis matching AgentAnalysisResult schema."
-                response = strands_agent.run(prompt_msg)
+                prompt_msg = (
+                    f"Analyze lead '{lead_id}' using read-only tools. "
+                    f"After using tools, output ONLY a single valid JSON object matching this schema:\n"
+                    f"{json.dumps(AgentAnalysisResult.model_json_schema())}"
+                )
+                
+                if hasattr(strands_agent, "ask"):
+                    response = strands_agent.ask(prompt_msg)
+                elif hasattr(strands_agent, "run"):
+                    response = strands_agent.run(prompt_msg)
+                else:
+                    response = strands_agent(prompt_msg)
                 
                 # Parse JSON output from Strands agent response
                 raw_text = str(response)
-                json_start = raw_text.find("{")
-                json_end = raw_text.rfind("}") + 1
-                if json_start != -1 and json_end > json_start:
-                    parsed_dict = json.loads(raw_text[json_start:json_end])
-                else:
-                    parsed_dict = json.loads(raw_text)
+                parsed_dict = _extract_json_dict(raw_text)
 
-                result = AgentAnalysisResult(**parsed_dict)
+                # Normalize enum fields to lower-case string
+                for enum_field in ["intent", "urgency", "customer_stage"]:
+                    if enum_field in parsed_dict and isinstance(parsed_dict[enum_field], str):
+                        parsed_dict[enum_field] = parsed_dict[enum_field].lower()
+
+                # Remove extra fields if LLM attempted forbidden fields (e.g. score, priority, etc.)
+                allowed_fields = set(AgentAnalysisResult.model_fields.keys())
+                cleaned_dict = {k: v for k, v in parsed_dict.items() if k in allowed_fields}
+
+                result = AgentAnalysisResult(**cleaned_dict)
                 events.append({"event": "agent_inference_success", "provider": "amazon_bedrock"})
                 return result, events
 
