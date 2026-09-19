@@ -1,10 +1,11 @@
 """
 LeadRescue AI — Leads API Endpoints
-Endpoints for lead creation, listing, detailed retrieval, and AI analysis + deterministic policy evaluation.
+Endpoints for lead creation, listing, detailed retrieval, AI analysis, and response approval.
 """
 
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 
 from app.agent.lead_agent import LeadRescueAgent
 from app.api.deps import get_audit_repo, get_config_repo, get_followups_repo, get_leads_repo
@@ -18,6 +19,11 @@ from app.repositories.followups import FollowUpsRepository
 from app.repositories.leads import LeadsRepository
 
 router = APIRouter(prefix="/leads", tags=["Leads"])
+
+
+class ResponseActionRequest(BaseModel):
+    action: str  # "approve" | "edit" | "reject"
+    response_draft: Optional[str] = None
 
 
 @router.post("", response_model=Lead, status_code=status.HTTP_201_CREATED)
@@ -178,6 +184,55 @@ async def analyze_lead(
                 "followup_created": bool(policy_res.followup_recommendation),
                 "audit_notes": policy_res.audit_notes,
             },
+        )
+    )
+
+    return saved_lead
+
+
+@router.post("/{lead_id}/respond", response_model=Lead)
+async def respond_to_lead(
+    lead_id: str,
+    req: ResponseActionRequest,
+    leads_repo: LeadsRepository = Depends(get_leads_repo),
+    audit_repo: AuditRepository = Depends(get_audit_repo),
+):
+    """
+    Human operator action endpoint: Approve & Simulate Send, Edit Draft, or Reject Response.
+    """
+    lead = leads_repo.get_by_id(lead_id)
+    if not lead:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Lead with ID '{lead_id}' not found",
+        )
+
+    if req.response_draft:
+        lead.response_draft = req.response_draft
+
+    if req.action == "approve":
+        lead.response_status = ResponseStatusEnum.SIMULATED_SENT
+        lead.lifecycle_status = LifecycleStatusEnum.CONTACTED
+        lead.risk_status = RiskStatusEnum.NORMAL
+        action_name = "response_simulated_sent"
+        actor = "human_operator"
+    elif req.action == "reject":
+        lead.response_status = ResponseStatusEnum.REJECTED
+        action_name = "response_rejected"
+        actor = "human_operator"
+    else:  # edit
+        lead.response_status = ResponseStatusEnum.DRAFT
+        action_name = "response_edited"
+        actor = "human_operator"
+
+    saved_lead = leads_repo.save(lead)
+
+    audit_repo.create(
+        AuditEventCreate(
+            lead_id=lead_id,
+            action=action_name,
+            actor=actor,
+            details={"action": req.action, "response_status": saved_lead.response_status.value},
         )
     )
 
