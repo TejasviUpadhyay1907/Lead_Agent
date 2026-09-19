@@ -1,6 +1,6 @@
 """
 LeadRescue AI — Demo Clock & Seeding API Endpoints
-Provides API endpoints for advancing demo time (+20m), resetting clock, and seeding synthetic canonical leads.
+Provides API endpoints for advancing demo time (+20m), resetting clock, inspecting clock, and seeding synthetic canonical leads.
 """
 
 from datetime import timedelta
@@ -24,6 +24,17 @@ class AdvanceTimeRequest(BaseModel):
     minutes: int = 20
 
 
+@router.get("/clock")
+async def get_demo_clock():
+    """
+    Get current effective demo clock time.
+    """
+    return {
+        "status": "success",
+        "effective_now": effective_now_iso(),
+    }
+
+
 @router.post("/advance-time")
 async def advance_demo_time(
     req: AdvanceTimeRequest,
@@ -45,6 +56,7 @@ async def advance_demo_time(
     for lead in all_leads:
         new_risk, _ = evaluate_risk(lead, business_rules)
         if new_risk != lead.risk_status:
+            prev_risk = lead.risk_status.value
             lead.risk_status = new_risk
             leads_repo.save(lead)
             if new_risk.value == "at_risk":
@@ -54,9 +66,26 @@ async def advance_demo_time(
                         lead_id=lead.lead_id,
                         action="risk_changed",
                         actor="demo_clock",
-                        details={"new_risk": "at_risk", "advanced_minutes": req.minutes},
+                        details={
+                            "previous_risk": prev_risk,
+                            "new_risk": "at_risk",
+                            "advanced_minutes": req.minutes,
+                        },
                     )
                 )
+
+    audit_repo.create(
+        AuditEventCreate(
+            lead_id="system",
+            action="demo_time_advanced",
+            actor="demo_clock",
+            details={
+                "advanced_minutes": req.minutes,
+                "effective_now": effective_now_iso(),
+                "at_risk_count": at_risk_count,
+            },
+        )
+    )
 
     return {
         "status": "success",
@@ -66,12 +95,7 @@ async def advance_demo_time(
     }
 
 
-@router.post("/reset-clock")
-async def reset_demo_clock(
-    leads_repo: LeadsRepository = Depends(get_leads_repo),
-    config_repo: ConfigRepository = Depends(get_config_repo),
-):
-    """Reset simulated clock back to real system UTC time and re-evaluate risk."""
+async def perform_reset_clock(leads_repo: LeadsRepository, config_repo: ConfigRepository, audit_repo: AuditRepository):
     reset_simulated_now()
     business_rules = config_repo.get_config("business_rules").config_value
     for lead in leads_repo.list_leads():
@@ -80,7 +104,36 @@ async def reset_demo_clock(
             lead.risk_status = new_risk
             leads_repo.save(lead)
 
+    audit_repo.create(
+        AuditEventCreate(
+            lead_id="system",
+            action="demo_clock_reset",
+            actor="demo_clock",
+            details={"effective_now": effective_now_iso()},
+        )
+    )
+
     return {"status": "success", "effective_now": effective_now_iso()}
+
+
+@router.post("/reset")
+async def reset_demo_clock_canonical(
+    leads_repo: LeadsRepository = Depends(get_leads_repo),
+    config_repo: ConfigRepository = Depends(get_config_repo),
+    audit_repo: AuditRepository = Depends(get_audit_repo),
+):
+    """Canonical route for resetting simulated clock back to real system UTC time."""
+    return await perform_reset_clock(leads_repo, config_repo, audit_repo)
+
+
+@router.post("/reset-clock")
+async def reset_demo_clock_alias(
+    leads_repo: LeadsRepository = Depends(get_leads_repo),
+    config_repo: ConfigRepository = Depends(get_config_repo),
+    audit_repo: AuditRepository = Depends(get_audit_repo),
+):
+    """Backwards-compatible alias for resetting clock."""
+    return await perform_reset_clock(leads_repo, config_repo, audit_repo)
 
 
 @router.post("/seed")

@@ -1,9 +1,24 @@
 import React, { useState } from 'react';
-import { Clock, CheckCircle, AlertTriangle, ChevronRight, Calendar } from 'lucide-react';
+import { Clock, CheckCircle, AlertTriangle, ChevronRight, Calendar, Check } from 'lucide-react';
 import { PriorityBadge } from '../components/Common/Badge';
+import { api } from '../api/client';
 
-export function FollowupsView({ followups, leads, onSelectLead }) {
+export function FollowupsView({ followups, leads, onSelectLead, onRefreshLeads }) {
     const [activeTab, setActiveTab] = useState('due');
+    const [updatingId, setUpdatingId] = useState(null);
+
+    const handleComplete = async (e, followupId) => {
+        e.stopPropagation(); // prevent opening lead detail view
+        setUpdatingId(followupId);
+        try {
+            await api.updateFollowup(followupId, 'completed', 'Marked completed from Follow-ups Console');
+            if (onRefreshLeads) onRefreshLeads();
+        } catch (err) {
+            alert(`Failed to update follow-up: ${err.message}`);
+        } finally {
+            setUpdatingId(null);
+        }
+    };
 
     // Map followups with lead info
     const enrichedFollowups = followups.map((f) => {
@@ -137,13 +152,25 @@ export function FollowupsView({ followups, leads, onSelectLead }) {
                                     </div>
                                 </div>
 
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '1.5rem' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem' }}>
                                     <div style={{ textAlign: 'right' }}>
                                         <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)', display: 'block' }}>DUE TIMESTAMP</span>
                                         <span style={{ fontSize: '0.85rem', fontFamily: 'var(--font-mono)', color: 'var(--color-warm)' }}>
                                             {new Date(item.due_at).toLocaleString()}
                                         </span>
                                     </div>
+
+                                    {item.status !== 'completed' && item.lifecycle_status !== 'opted_out' && (
+                                        <button
+                                            onClick={(e) => handleComplete(e, item.followup_id)}
+                                            disabled={updatingId === item.followup_id}
+                                            className="btn-secondary"
+                                            style={{ padding: '0.4rem 0.65rem', fontSize: '0.8rem', color: 'var(--color-success)', borderColor: 'var(--border-success)' }}
+                                        >
+                                            <Check size={14} /> Complete
+                                        </button>
+                                    )}
+
                                     <ChevronRight size={18} color="var(--text-dim)" />
                                 </div>
                             </div>

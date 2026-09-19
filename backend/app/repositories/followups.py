@@ -37,6 +37,17 @@ class FollowUpsRepository:
             self._memory_store[followup.followup_id] = followup
             return followup
 
+    def save(self, followup: FollowUp) -> FollowUp:
+        if self.use_memory or not self._table:
+            self._memory_store[followup.followup_id] = followup
+            return followup
+        try:
+            self._table.put_item(Item=followup.model_dump())
+            return followup
+        except Exception:
+            self._memory_store[followup.followup_id] = followup
+            return followup
+
     def get_by_id(self, followup_id: str) -> Optional[FollowUp]:
         if self.use_memory or not self._table:
             return self._memory_store.get(followup_id)
@@ -82,13 +93,4 @@ class FollowUpsRepository:
             if value is not None:
                 setattr(followup, key, value)
 
-        if self.use_memory or not self._table:
-            self._memory_store[followup_id] = followup
-            return followup
-
-        try:
-            self._table.put_item(Item=followup.model_dump())
-            return followup
-        except Exception:
-            self._memory_store[followup_id] = followup
-            return followup
+        return self.save(followup)

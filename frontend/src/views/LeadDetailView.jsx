@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
     ArrowLeft, Sparkles, Cpu, CheckCircle, ShieldAlert, Send, Edit3, XCircle,
-    Clock, MapPin, Package, AlertTriangle, Flame, Shield, History, Activity, FileText
+    Clock, MapPin, Package, AlertTriangle, Flame, Shield, History, Activity, FileText, LifeBuoy
 } from 'lucide-react';
 import { PriorityBadge, RiskBadge, LifecycleBadge } from '../components/Common/Badge';
 import { api } from '../api/client';
@@ -12,6 +12,7 @@ export function LeadDetailView({ leadId, onBack, onRefreshLeads }) {
     const [loading, setLoading] = useState(true);
     const [analyzing, setAnalyzing] = useState(false);
     const [responding, setResponding] = useState(false);
+    const [rescuing, setRescuing] = useState(false);
     const [error, setError] = useState(null);
 
     const [responseDraftText, setResponseDraftText] = useState('');
@@ -54,6 +55,24 @@ export function LeadDetailView({ leadId, onBack, onRefreshLeads }) {
             alert(`Analysis failed: ${err.message}`);
         } finally {
             setAnalyzing(false);
+        }
+    };
+
+    const handleRescue = async () => {
+        setRescuing(true);
+        try {
+            const result = await api.rescueLead(leadId);
+            if (result.rescued) {
+                alert(`Deterministic Rescue Triggered! Follow-up created (Due: ${new Date(result.due_at).toLocaleTimeString()}). Human approval still required.`);
+            } else {
+                alert(`Rescue Blocked: ${result.reason}`);
+            }
+            await loadLeadData();
+            if (onRefreshLeads) onRefreshLeads();
+        } catch (err) {
+            alert(`Rescue action failed: ${err.message}`);
+        } finally {
+            setRescuing(false);
         }
     };
 
@@ -106,6 +125,7 @@ export function LeadDetailView({ leadId, onBack, onRefreshLeads }) {
     };
 
     const isOptedOut = lead.lifecycle_status === 'opted_out';
+    const isResolved = lead.lifecycle_status === 'resolved';
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
@@ -128,8 +148,14 @@ export function LeadDetailView({ leadId, onBack, onRefreshLeads }) {
                     </div>
                 </div>
 
-                {/* Action Trigger */}
+                {/* Action Trigger Header */}
                 <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                    {lead.risk_status === 'at_risk' && !isOptedOut && !isResolved && (
+                        <button onClick={handleRescue} disabled={rescuing} className="btn-primary" style={{ background: 'var(--color-hot)' }}>
+                            <LifeBuoy size={16} /> {rescuing ? 'Triggering Rescue...' : 'Rescue Lead'}
+                        </button>
+                    )}
+
                     {!lead.intent && (
                         <button onClick={handleAnalyze} disabled={analyzing} className="btn-primary">
                             <Sparkles size={16} /> {analyzing ? 'Analyzing with Agent...' : 'Analyze Lead'}

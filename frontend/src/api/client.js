@@ -51,13 +51,33 @@ export const api = {
         method: 'POST',
     }),
 
-    respondToLead: (id, action, draftText) => request(`/leads/${id}/respond`, {
+    respondToLead: (id, action, editedDraft) => request(`/leads/${id}/response`, {
+        method: 'PUT',
+        body: JSON.stringify({ action, edited_draft: editedDraft }),
+    }),
+
+    rescueLead: (id) => request(`/leads/${id}/rescue`, {
         method: 'POST',
-        body: JSON.stringify({ action, response_draft: draftText }),
+    }),
+
+    updateLeadStatus: (id, lifecycleStatus, reason) => request(`/leads/${id}/status`, {
+        method: 'PUT',
+        body: JSON.stringify({ lifecycle_status: lifecycleStatus, reason }),
     }),
 
     // Follow-ups
-    getFollowups: () => request('/followups'),
+    getFollowups: (params = {}) => {
+        const query = new URLSearchParams();
+        if (params.lead_id) query.append('lead_id', params.lead_id);
+        if (params.status) query.append('status', params.status);
+        const queryString = query.toString() ? `?${query.toString()}` : '';
+        return request(`/followups${queryString}`);
+    },
+
+    updateFollowup: (id, status, notes) => request(`/followups/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ status, notes }),
+    }),
 
     // Audit
     getAudit: (id) => request(`/leads/${id}/audit`),
@@ -71,12 +91,14 @@ export const api = {
     }),
 
     // Demo Controls
+    getDemoClock: () => request('/demo/clock'),
+
     advanceDemoTime: (minutes = 20) => request('/demo/advance-time', {
         method: 'POST',
         body: JSON.stringify({ minutes }),
     }),
 
-    resetDemoClock: () => request('/demo/reset-clock', {
+    resetDemoClock: () => request('/demo/reset', {
         method: 'POST',
     }),
 
