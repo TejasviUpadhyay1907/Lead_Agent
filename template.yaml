@@ -5,6 +5,11 @@ Description: >
   WeMakeDevs x AWS First Commit — Bharat Builds Tour 2026.
 
 Globals:
+  Api:
+    Cors:
+      AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+      AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+      AllowOrigin: "'*'"
   Function:
     Runtime: python3.12
     Timeout: 60
@@ -17,8 +22,7 @@ Parameters:
   BedrockModelId:
     Type: String
     Description: Active Bedrock foundation model ID
-    # Set during deployment — do not hardcode an EOL model
-    Default: ""
+    Default: "us.amazon.nova-lite-v1:0"
 
 Resources:
   # ============================================================
@@ -33,6 +37,7 @@ Resources:
       Environment:
         Variables:
           BEDROCK_MODEL_ID: !Ref BedrockModelId
+          BEDROCK_REGION: !Ref "AWS::Region"
           LEADS_TABLE: !Ref LeadsTable
           FOLLOWUPS_TABLE: !Ref FollowupsTable
           AUDIT_TABLE: !Ref AuditTable
