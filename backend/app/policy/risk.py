@@ -20,7 +20,8 @@ def calculate_at_risk_timestamp(created_at_iso: str, response_target_minutes: in
     except Exception:
         created_dt = effective_now()
 
-    at_risk_dt = created_dt + timedelta(minutes=response_target_minutes)
+    target_mins = int(response_target_minutes) if response_target_minutes is not None else 20
+    at_risk_dt = created_dt + timedelta(minutes=target_mins)
     return at_risk_dt.isoformat()
 
 
