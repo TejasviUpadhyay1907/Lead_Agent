@@ -1,186 +1,334 @@
-import React, { useState, useEffect } from 'react';
-import { Settings, Save, Shield, Database, Server } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Settings, Save, Server, ListChecks, Info } from 'lucide-react';
 import { api } from '../api/client';
+import { PageHeader, SectionHeader, ErrorState, Notice, Skeleton, BusyLabel } from '../components/Common/UI';
+import { dateTime, humanize, safeError } from '../api/presentation';
 
-export function SettingsView() {
-    const [config, setConfig] = useState({
-        business_name: 'LeadRescue AI SMB Demo',
-        response_target_minutes: 20,
-        high_value_threshold: 50000,
-        supported_locations: ['Pune', 'Mumbai', 'Delhi', 'Bangalore'],
-    });
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
 
+/** Only these keys are ever edited. Every other returned key is preserved untouched on save. */
+const EDITABLE_KEYS = ['business_name', 'response_target_minutes', 'high_value_threshold', 'supported_locations'];
+
+const SENSITIVE_KEY = /(secret|token|password|passwd|credential|api[_-]?key|private)/i;
+
+function formatConfigValue(value) {
+    if (value === null || value === undefined) return 'Not available';
+    if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+    if (Array.isArray(value)) return value.length ? value.join(', ') : 'None';
+    if (typeof value === 'object') {
+        try {
+            return JSON.stringify(value);
+        } catch {
+            return 'Not available';
+        }
+    }
+    return String(value);
+}
+
+export function SettingsView({ onRefreshData, clock, demoMode = false }) {
+    const [config, setConfig] = useState(null);
+    const [locationsText, setLocationsText] = useState('');
     const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState(null);
     const [saving, setSaving] = useState(false);
-    const [saveSuccess, setSaveSuccess] = useState(false);
+    const [notice, setNotice] = useState(null);
+    const [actionError, setActionError] = useState(null);
+    const [loadedAt, setLoadedAt] = useState(null);
+
+    const applyConfig = value => {
+        setConfig(value);
+        setLocationsText(Array.isArray(value.supported_locations) ? value.supported_locations.join(', ') : '');
+    };
+
+    const loadConfig = async () => {
+        setLoading(true);
+        setLoadError(null);
+        setNotice(null);
+        setActionError(null);
+        try {
+            const response = await api.getConfig();
+            const value = response && typeof response.config_value === 'object' && response.config_value !== null
+                ? response.config_value
+                : null;
+            if (!value) {
+                setConfig(null);
+                setLoadError('The server did not return a configuration value.');
+                return;
+            }
+            applyConfig(value);
+            setLoadedAt(new Date().toISOString());
+        } catch (error) {
+            setConfig(null);
+            setLoadError(safeError(error, 'The configuration could not be loaded from the server.'));
+        } finally {
+            setLoading(false);
+        }
+    };
 
     useEffect(() => {
-        async function loadConfig() {
-            try {
-                const res = await api.getConfig();
-                if (res && res.config_value) {
-                    setConfig(res.config_value);
-                }
-            } catch (err) {
-                console.error('Failed to load settings:', err);
-            } finally {
-                setLoading(false);
-            }
-        }
         loadConfig();
     }, []);
 
-    const handleSave = async (e) => {
-        e.preventDefault();
+    const hasKey = key => config !== null && Object.prototype.hasOwnProperty.call(config, key);
+    const updateField = (key, value) => setConfig(previous => ({ ...previous, [key]: value }));
+
+    const handleSubmit = async event => {
+        event.preventDefault();
+        if (!config) return;
+
+        setNotice(null);
+        setActionError(null);
+
+        const payload = { ...config };
+
+        if (hasKey('supported_locations')) {
+            payload.supported_locations = locationsText
+                .split(',')
+                .map(part => part.trim())
+                .filter(Boolean);
+            if (payload.supported_locations.length > 200 || payload.supported_locations.some(location => location.length > 120)) {
+                setActionError('Enter up to 200 supported locations, each no longer than 120 characters.');
+                return;
+            }
+            const uniqueLocations = new Set(payload.supported_locations.map(location => location.toLocaleLowerCase()));
+            if (uniqueLocations.size !== payload.supported_locations.length) {
+                setActionError('Remove duplicate locations before saving.');
+                return;
+            }
+        }
+        if (hasKey('response_target_minutes')) {
+            const minutes = Number(payload.response_target_minutes);
+            if (!Number.isInteger(minutes) || minutes < 1 || minutes > 10080) {
+                setActionError('Response target must be a whole number from 1 to 10080 minutes.');
+                return;
+            }
+            payload.response_target_minutes = minutes;
+        }
+        if (hasKey('high_value_threshold')) {
+            const threshold = Number(payload.high_value_threshold);
+            if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1_000_000_000_000_000) {
+                setActionError('High-value threshold must be between zero and 1000000000000000.');
+                return;
+            }
+            payload.high_value_threshold = threshold;
+        }
+        if (hasKey('business_name')) {
+            const name = String(payload.business_name ?? '').trim();
+            if (!name || name.length > 120) {
+                setActionError('Business name must contain 1 to 120 characters.');
+                return;
+            }
+            payload.business_name = name;
+        }
+
         setSaving(true);
-        setSaveSuccess(false);
         try {
-            await api.updateConfig(config);
-            setSaveSuccess(true);
-            setTimeout(() => setSaveSuccess(false), 3000);
-        } catch (err) {
-            alert(`Failed to save settings: ${err.message}`);
+            const response = await api.updateConfig(payload);
+            const saved = response && typeof response.config_value === 'object' && response.config_value !== null
+                ? response.config_value
+                : payload;
+            applyConfig(saved);
+            setLoadedAt(new Date().toISOString());
+            setNotice('Configuration saved.');
+            if (onRefreshData) await onRefreshData();
+        } catch (error) {
+            setActionError(safeError(error, 'The configuration could not be saved. Review the values and try again.'));
         } finally {
             setSaving(false);
         }
     };
 
+    const header = (
+        <PageHeader
+            eyebrow="Configuration"
+            title="Settings"
+            description="Business rules are owned by the server. This view edits only the values the API returns."
+        >
+            {onRefreshData && (
+                <button type="button" className="btn-secondary" onClick={loadConfig} disabled={loading}>
+                    Reload configuration
+                </button>
+            )}
+        </PageHeader>
+    );
+
     if (loading) {
-        return <div style={{ padding: '3rem', textAlign: 'center', color: 'var(--text-dim)' }}>Loading Configuration...</div>;
+        return (
+            <div className="view-stack">
+                {header}
+                <Skeleton rows={5} label="Loading configuration…" />
+            </div>
+        );
     }
 
+    if (loadError || !config) {
+        return (
+            <div className="view-stack">
+                {header}
+                <ErrorState
+                    title="Unable to load configuration"
+                    description={loadError || 'No configuration value was returned.'}
+                    onRetry={loadConfig}
+                />
+            </div>
+        );
+    }
+
+    const editablePresent = EDITABLE_KEYS.filter(key => hasKey(key));
+    const preservedKeys = Object.entries(config).filter(([key]) => !EDITABLE_KEYS.includes(key));
+
     return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', maxWidth: '800px' }}>
-            {/* Header */}
-            <div>
-                <h2 style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '0.2rem' }}>Settings & Business Rules</h2>
-                <p style={{ fontSize: '0.875rem', color: 'var(--text-muted)' }}>
-                    Configure policy parameters, response SLAs, and high-value thresholds.
-                </p>
-            </div>
+        <div className="view-stack settings-layout">
+            {header}
 
-            {/* Main Settings Form */}
-            <div className="panel">
-                <div className="panel-header">
-                    <div className="panel-title">
-                        <Settings size={18} color="var(--accent-primary)" />
-                        Deterministic Business Rules Configuration
-                    </div>
-                    <span className="badge-sub">DynamoDB Table: config</span>
-                </div>
+            {notice && <Notice tone="success">{notice}</Notice>}
+            {actionError && <Notice tone="error">{actionError}</Notice>}
 
-                <form onSubmit={handleSave} style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-                    <div>
-                        <label style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-main)', display: 'block', marginBottom: '0.3rem' }}>
-                            Business / Organization Name
-                        </label>
-                        <input
-                            type="text"
-                            value={config.business_name || ''}
-                            onChange={(e) => setConfig({ ...config, business_name: e.target.value })}
-                            style={{
-                                width: '100%',
-                                padding: '0.6rem',
-                                borderRadius: 'var(--radius-sm)',
-                                background: 'var(--bg-dark-0)',
-                                border: '1px solid var(--border-color)',
-                                color: 'var(--text-main)',
-                                fontSize: '0.9rem',
-                            }}
-                        />
-                    </div>
+            <section className="panel">
+                <SectionHeader
+                    icon={Settings}
+                    title="Business rules"
+                    subtitle="Deterministic policy parameters evaluated by the server."
+                />
 
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                        <div>
-                            <label style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-main)', display: 'block', marginBottom: '0.3rem' }}>
-                                Response Target SLA (Minutes) *
-                            </label>
-                            <input
-                                type="number"
-                                required
-                                min={1}
-                                value={config.response_target_minutes || 20}
-                                onChange={(e) => setConfig({ ...config, response_target_minutes: parseInt(e.target.value) || 20 })}
-                                style={{
-                                    width: '100%',
-                                    padding: '0.6rem',
-                                    borderRadius: 'var(--radius-sm)',
-                                    background: 'var(--bg-dark-0)',
-                                    border: '1px solid var(--border-color)',
-                                    color: 'var(--text-main)',
-                                    fontSize: '0.9rem',
-                                }}
-                            />
-                            <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)', display: 'block', marginTop: '0.2rem' }}>
-                                Leads unresponded after this duration trigger AT_RISK status.
-                            </span>
+                {editablePresent.length === 0 ? (
+                    <p className="form-note">
+                        The returned configuration does not expose any editable fields.
+                    </p>
+                ) : (
+                    <form className="settings-form" onSubmit={handleSubmit}>
+                        <div className="form-grid">
+                            {hasKey('business_name') && (
+                                <div className="field">
+                                    <label className="field-label" htmlFor="config-business-name">Business name</label>
+                                    <input
+                                        id="config-business-name"
+                                        type="text"
+                                        maxLength={120}
+                                        required
+                                        className="field-input"
+                                        value={config.business_name ?? ''}
+                                        onChange={event => updateField('business_name', event.target.value)}
+                                    />
+                                    <span className="field-hint">Used in generated customer responses.</span>
+                                </div>
+                            )}
+
+                            {hasKey('response_target_minutes') && (
+                                <div className="field">
+                                    <label className="field-label" htmlFor="config-response-target">Response target (minutes)</label>
+                                    <input
+                                        id="config-response-target"
+                                        type="number"
+                                        min={1}
+                                        max={10080}
+                                        step={1}
+                                        required
+                                        className="field-input"
+                                        value={config.response_target_minutes ?? ''}
+                                        onChange={event => updateField('response_target_minutes', event.target.value)}
+                                    />
+                                    <span className="field-hint">Leads unanswered beyond this window become at risk.</span>
+                                </div>
+                            )}
+
+                            {hasKey('high_value_threshold') && (
+                                <div className="field">
+                                    <label className="field-label" htmlFor="config-high-value">High-value threshold</label>
+                                    <input
+                                        id="config-high-value"
+                                        type="number"
+                                        min={0}
+                                        max={1_000_000_000_000_000}
+                                        step={1}
+                                        required
+                                        className="field-input"
+                                        value={config.high_value_threshold ?? ''}
+                                        onChange={event => updateField('high_value_threshold', event.target.value)}
+                                    />
+                                    <span className="field-hint">Deals above this value score as high value.</span>
+                                </div>
+                            )}
+
+                            {hasKey('supported_locations') && (
+                                <div className="field">
+                                    <label className="field-label" htmlFor="config-locations">Supported locations</label>
+                                    <input
+                                        id="config-locations"
+                                        type="text"
+                                        className="field-input"
+                                        placeholder="Pune, Mumbai, Delhi"
+                                        value={locationsText}
+                                        onChange={event => setLocationsText(event.target.value)}
+                                    />
+                                    <span className="field-hint">Comma-separated list of serviceable locations.</span>
+                                </div>
+                            )}
                         </div>
 
-                        <div>
-                            <label style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-main)', display: 'block', marginBottom: '0.3rem' }}>
-                                High-Value Deal Threshold ($) *
-                            </label>
-                            <input
-                                type="number"
-                                required
-                                min={0}
-                                value={config.high_value_threshold || 50000}
-                                onChange={(e) => setConfig({ ...config, high_value_threshold: parseFloat(e.target.value) || 0 })}
-                                style={{
-                                    width: '100%',
-                                    padding: '0.6rem',
-                                    borderRadius: 'var(--radius-sm)',
-                                    background: 'var(--bg-dark-0)',
-                                    border: '1px solid var(--border-color)',
-                                    color: 'var(--text-main)',
-                                    fontSize: '0.9rem',
-                                }}
-                            />
-                            <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)', display: 'block', marginTop: '0.2rem' }}>
-                                Deals exceeding this value award +5 bonus score points.
-                            </span>
+                        <div className="form-actions">
+                            <button type="submit" className="btn-primary" disabled={saving}>
+                                {saving ? <BusyLabel>Saving…</BusyLabel> : <><Save size={16} aria-hidden="true" /> Save configuration</>}
+                            </button>
                         </div>
-                    </div>
+                    </form>
+                )}
+            </section>
 
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid var(--border-color)' }}>
-                        {saveSuccess ? (
-                            <span style={{ color: 'var(--color-success)', fontWeight: 600, fontSize: '0.85rem' }}>
-                                ✓ Settings successfully saved to DynamoDB
-                            </span>
-                        ) : <span />}
+            {preservedKeys.length > 0 && (
+                <section className="panel">
+                    <SectionHeader
+                        icon={ListChecks}
+                        title="Other configuration keys"
+                        subtitle="Read-only. These values are sent back unchanged when you save."
+                    />
+                    <dl className="config-list">
+                        {preservedKeys.map(([key, value]) => (
+                            <div className="config-row" key={key}>
+                                <dt className="config-key">{humanize(key)}</dt>
+                                <dd className="config-value">
+                                    {SENSITIVE_KEY.test(key) ? '•••• (preserved)' : formatConfigValue(value)}
+                                </dd>
+                            </div>
+                        ))}
+                    </dl>
+                </section>
+            )}
 
-                        <button type="submit" disabled={saving} className="btn-primary">
-                            <Save size={16} /> {saving ? 'Saving...' : 'Save Configuration'}
-                        </button>
+            <section className="panel">
+                <SectionHeader
+                    icon={Server}
+                    title="Runtime"
+                    subtitle="Values reported by the running system."
+                />
+                <dl className="info-list">
+                    <div className="info-row">
+                        <dt className="info-label">API base URL</dt>
+                        <dd className="info-value code-value">{API_BASE_URL}</dd>
                     </div>
-                </form>
-            </div>
+                    {demoMode && <div className="info-row">
+                        <dt className="info-label">Demo clock</dt>
+                        <dd className="info-value">{clock?.effective_now ? dateTime(clock.effective_now) : 'Not available'}</dd>
+                    </div>}
+                    <div className="info-row">
+                        <dt className="info-label">Configuration loaded</dt>
+                        <dd className="info-value">{loadedAt ? dateTime(loadedAt) : 'Not available'}</dd>
+                    </div>
+                </dl>
+            </section>
 
-            {/* System Infrastructure Information */}
-            <div className="panel" style={{ background: 'var(--bg-dark-0)' }}>
-                <div className="panel-header">
-                    <div className="panel-title" style={{ fontSize: '0.9rem' }}>
-                        <Server size={16} color="var(--accent-primary)" />
-                        Backend Infrastructure Environment
-                    </div>
-                </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', fontSize: '0.85rem' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                        <span style={{ color: 'var(--text-dim)' }}>API Base URL:</span>
-                        <code style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent-primary)' }}>{import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000/api'}</code>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                        <span style={{ color: 'var(--text-dim)' }}>Strands Agent SDK:</span>
-                        <span style={{ color: 'var(--color-success)', fontWeight: 600 }}>1.56.0 Connected</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                        <span style={{ color: 'var(--text-dim)' }}>AWS Bedrock Verification:</span>
-                        <span style={{ color: 'var(--color-warning)', fontWeight: 600 }}>Local Offline Fallback (Unconfigured Host AWS CLI)</span>
-                    </div>
-                </div>
-            </div>
-
+            <section className="panel design-note">
+                <SectionHeader
+                    icon={Info}
+                    title="Architecture (design)"
+                    subtitle="How the system is designed to behave — not a live health check."
+                />
+                <ul className="design-list">
+                    <li><strong>AI understands</strong> — extracts intent and context and drafts a reply.</li>
+                    <li><strong>Software decides</strong> — the deterministic policy engine owns score, priority, SLA and safeguards.</li>
+                    <li><strong>Human approves</strong> — an operator reviews and sends every customer response.</li>
+                </ul>
+            </section>
         </div>
     );
 }

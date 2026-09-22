@@ -5,10 +5,11 @@ Provides API endpoints for advancing demo time (+20m), resetting clock, inspecti
 
 from datetime import timedelta
 from typing import Dict, Optional
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from app.api.deps import get_audit_repo, get_config_repo, get_leads_repo
+from app.config.settings import settings
 from app.models.audit import AuditEventCreate
 from app.policy.risk import evaluate_risk
 from app.repositories.audit import AuditRepository
@@ -20,12 +21,17 @@ from app.utils.time import effective_now, effective_now_iso, reset_simulated_now
 router = APIRouter(prefix="/demo", tags=["Demo"])
 
 
+def require_demo_mode():
+    if not settings.demo_enabled:
+        raise HTTPException(status_code=404, detail="Demo endpoints are disabled")
+
+
 class AdvanceTimeRequest(BaseModel):
     minutes: int = 20
 
 
 @router.get("/clock")
-async def get_demo_clock():
+def get_demo_clock(_demo=Depends(require_demo_mode)):
     """
     Get current effective demo clock time.
     """
@@ -36,8 +42,9 @@ async def get_demo_clock():
 
 
 @router.post("/advance-time")
-async def advance_demo_time(
+def advance_demo_time(
     req: AdvanceTimeRequest,
+    _demo=Depends(require_demo_mode),
     leads_repo: LeadsRepository = Depends(get_leads_repo),
     config_repo: ConfigRepository = Depends(get_config_repo),
     audit_repo: AuditRepository = Depends(get_audit_repo),
@@ -95,7 +102,7 @@ async def advance_demo_time(
     }
 
 
-async def perform_reset_clock(leads_repo: LeadsRepository, config_repo: ConfigRepository, audit_repo: AuditRepository):
+def perform_reset_clock(leads_repo: LeadsRepository, config_repo: ConfigRepository, audit_repo: AuditRepository):
     reset_simulated_now()
     business_rules = config_repo.get_config("business_rules").config_value
     for lead in leads_repo.list_leads():
@@ -117,27 +124,30 @@ async def perform_reset_clock(leads_repo: LeadsRepository, config_repo: ConfigRe
 
 
 @router.post("/reset")
-async def reset_demo_clock_canonical(
+def reset_demo_clock_canonical(
+    _demo=Depends(require_demo_mode),
     leads_repo: LeadsRepository = Depends(get_leads_repo),
     config_repo: ConfigRepository = Depends(get_config_repo),
     audit_repo: AuditRepository = Depends(get_audit_repo),
 ):
     """Canonical route for resetting simulated clock back to real system UTC time."""
-    return await perform_reset_clock(leads_repo, config_repo, audit_repo)
+    return perform_reset_clock(leads_repo, config_repo, audit_repo)
 
 
 @router.post("/reset-clock")
-async def reset_demo_clock_alias(
+def reset_demo_clock_alias(
+    _demo=Depends(require_demo_mode),
     leads_repo: LeadsRepository = Depends(get_leads_repo),
     config_repo: ConfigRepository = Depends(get_config_repo),
     audit_repo: AuditRepository = Depends(get_audit_repo),
 ):
     """Backwards-compatible alias for resetting clock."""
-    return await perform_reset_clock(leads_repo, config_repo, audit_repo)
+    return perform_reset_clock(leads_repo, config_repo, audit_repo)
 
 
 @router.post("/seed")
-async def seed_canonical_leads(
+def seed_canonical_leads(
+    _demo=Depends(require_demo_mode),
     leads_repo: LeadsRepository = Depends(get_leads_repo),
     audit_repo: AuditRepository = Depends(get_audit_repo),
 ):
@@ -152,7 +162,7 @@ async def seed_canonical_leads(
                 lead_id=lead.lead_id,
                 action="lead_received",
                 actor="system_seed",
-                details={"customer_name": lead.customer_name, "source": lead.source.value},
+                details={"source": lead.source.value},
             )
         )
 

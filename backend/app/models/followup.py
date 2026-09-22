@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 from pydantic import BaseModel, ConfigDict, Field
+from app.config.settings import settings
 
 from app.models.enums import FollowUpStatusEnum
 
@@ -36,6 +37,7 @@ class FollowUpUpdate(BaseModel):
 
 class FollowUp(FollowUpBase):
     followup_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    tenant_id: str = Field(default_factory=lambda: settings.effective_tenant_id)
     created_at: str = Field(default_factory=utc_now_iso)
     completed_at: Optional[str] = None
 

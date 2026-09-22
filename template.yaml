@@ -8,23 +8,124 @@ Globals:
   Api:
     Cors:
       AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
-      AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
-      AllowOrigin: "'*'"
+      AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,Idempotency-Key'"
+      AllowOrigin: !Sub "'${CorsOrigin}'"
   Function:
     Runtime: python3.12
     Timeout: 60
     MemorySize: 512
     Environment:
       Variables:
-        DEMO_MODE: "true"
+        DEMO_MODE: "false"
+        APP_ENV: "production"
 
 Parameters:
+  DemoMode:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: Enable synthetic-data demo endpoints. Keep false in production.
+  CorsOrigin:
+    Type: String
+    Default: "https://localhost"
+    Description: Single trusted browser origin for API Gateway CORS.
+  JwtIssuer:
+    Type: String
+    Description: OIDC issuer URL for the customer identity provider.
+  JwtJwksUrl:
+    Type: String
+    Description: Trusted JWKS endpoint from the OIDC provider discovery document.
+  JwtAudience:
+    Type: String
+    Description: OIDC audience or client_id accepted for API access tokens.
+  JwtRequiredScope:
+    Type: String
+    Description: OAuth scope required for all API requests.
+  TenantId:
+    Type: String
+    AllowedPattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    ConstraintDescription: Use 1–128 letters, numbers, dots, underscores, or hyphens.
+    Description: Company tenant claim required by this isolated deployment.
+  AdminRole:
+    Type: String
+    Default: "company_admin"
+    Description: Identity-provider role allowed to update company configuration.
+  OperatorRole:
+    Type: String
+    Default: "sales_operator"
+    Description: Identity-provider role allowed to create and manage leads.
+  WebhookSecretArn:
+    Type: String
+    Description: ARN of the Secrets Manager secret holding the inbound webhook HMAC secret.
   BedrockModelId:
     Type: String
     Description: Active Bedrock foundation model ID
     Default: "us.amazon.nova-lite-v1:0"
+  AlarmTopicArn:
+    Type: String
+    AllowedPattern: "^arn:[a-z0-9-]+:sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]+(\\.fifo)?$"
+    ConstraintDescription: Provide a valid SNS topic ARN in the deployment region with on-call subscribers.
+    Description: Required SNS topic ARN for production alarms.
+  LogRetentionDays:
+    Type: Number
+    Default: 90
+    AllowedValues: [30, 60, 90, 180, 365]
+    Description: CloudWatch log retention period in days.
+  AnalysisWorkerConcurrency:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    MaxValue: 50
+    Description: Maximum concurrent AI analysis workers for this customer deployment.
+  ApiRateLimit:
+    Type: Number
+    Default: 50
+    MinValue: 1
+    MaxValue: 5000
+    Description: API Gateway steady-state requests per second for this isolated customer API.
+  ApiBurstLimit:
+    Type: Number
+    Default: 100
+    MinValue: 1
+    MaxValue: 5000
+    Description: API Gateway burst request capacity for this isolated customer API.
 
 Resources:
+  AnalysisJobsDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 360
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  AnalysisJobsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 360
+      MessageRetentionPeriod: 345600
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt AnalysisJobsDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  LeadRescueApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      OpenApiVersion: "3.0.1"
+      MergeDefinitions: true
+      DefinitionBody:
+        openapi: "3.0.1"
+        info:
+          title: LeadRescue API
+          version: "1.0"
+        paths: {}
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          ThrottlingRateLimit: !Ref ApiRateLimit
+          ThrottlingBurstLimit: !Ref ApiBurstLimit
+
   # ============================================================
   # Lambda Function — Backend API
   # ============================================================
@@ -36,40 +137,305 @@ Resources:
       Description: LeadRescue AI backend API
       Environment:
         Variables:
+          DEMO_MODE: !Ref DemoMode
+          CORS_ORIGINS: !Ref CorsOrigin
+          JWT_ISSUER: !Ref JwtIssuer
+          JWT_JWKS_URL: !Ref JwtJwksUrl
+          JWT_AUDIENCE: !Ref JwtAudience
+          JWT_REQUIRED_SCOPE: !Ref JwtRequiredScope
+          TENANT_ID: !Ref TenantId
+          ADMIN_ROLE: !Ref AdminRole
+          OPERATOR_ROLE: !Ref OperatorRole
           BEDROCK_MODEL_ID: !Ref BedrockModelId
           BEDROCK_REGION: !Ref "AWS::Region"
           LEADS_TABLE: !Ref LeadsTable
           FOLLOWUPS_TABLE: !Ref FollowupsTable
           AUDIT_TABLE: !Ref AuditTable
           CONFIG_TABLE: !Ref ConfigTable
+          PROCESSED_EVENTS_TABLE: !Ref ProcessedEventsTable
+          CUSTOMER_SUPPRESSIONS_TABLE: !Ref CustomerSuppressionsTable
+          ANALYSIS_JOBS_TABLE: !Ref AnalysisJobsTable
+          ANALYSIS_QUEUE_URL: !Ref AnalysisJobsQueue
+          WEBHOOK_SECRET_ARN: !Ref WebhookSecretArn
       Policies:
-        # DynamoDB — least privilege, scoped to project tables
-        - DynamoDBCrudPolicy:
-            TableName: !Ref LeadsTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref FollowupsTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref AuditTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref ConfigTable
+        # Grant only the operations used by the repositories and their indexes.
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem]
+              Resource: !GetAtt LeadsTable.Arn
+            - Effect: Allow
+              Action: dynamodb:Query
+              Resource:
+                - !GetAtt LeadsTable.Arn
+                - !Sub "${LeadsTable.Arn}/index/*"
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem]
+              Resource: !GetAtt FollowupsTable.Arn
+            - Effect: Allow
+              Action: dynamodb:Query
+              Resource:
+                - !GetAtt FollowupsTable.Arn
+                - !Sub "${FollowupsTable.Arn}/index/*"
+            - Effect: Allow
+              Action: dynamodb:PutItem
+              Resource: !GetAtt AuditTable.Arn
+            - Effect: Allow
+              Action: dynamodb:Query
+              Resource:
+                - !GetAtt AuditTable.Arn
+                - !Sub "${AuditTable.Arn}/index/*"
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem]
+              Resource: !GetAtt ConfigTable.Arn
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem]
+              Resource: !GetAtt AnalysisJobsTable.Arn
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource: !GetAtt CustomerSuppressionsTable.Arn
+            - Effect: Allow
+              Action: sqs:SendMessage
+              Resource: !GetAtt AnalysisJobsQueue.Arn
         # Bedrock — invoke model permission
         - Statement:
             - Effect: Allow
               Action:
                 - bedrock:InvokeModel
-                - bedrock:InvokeModelWithResponseStream
-              Resource: "*"
+              Resource:
+                - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:TransactWriteItems
+              Resource:
+                - !GetAtt LeadsTable.Arn
+                - !GetAtt FollowupsTable.Arn
+                - !GetAtt AuditTable.Arn
+                - !GetAtt ConfigTable.Arn
+                - !GetAtt ProcessedEventsTable.Arn
+                - !GetAtt CustomerSuppressionsTable.Arn
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource: !GetAtt ProcessedEventsTable.Arn
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref WebhookSecretArn
       Events:
         ApiProxy:
           Type: Api
           Properties:
+            RestApiId: !Ref LeadRescueApi
             Path: /{proxy+}
             Method: ANY
         ApiRoot:
           Type: Api
           Properties:
+            RestApiId: !Ref LeadRescueApi
             Path: /
             Method: ANY
+
+  LeadRescueAnalysisWorker:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/
+      Handler: app.worker.handler
+      Description: Processes durable lead-analysis jobs from SQS
+      Timeout: 60
+      MemorySize: 768
+      ReservedConcurrentExecutions: !Ref AnalysisWorkerConcurrency
+      Environment:
+        Variables:
+          DEMO_MODE: "false"
+          APP_ENV: production
+          TENANT_ID: !Ref TenantId
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+          BEDROCK_REGION: !Ref "AWS::Region"
+          LEADS_TABLE: !Ref LeadsTable
+          FOLLOWUPS_TABLE: !Ref FollowupsTable
+          AUDIT_TABLE: !Ref AuditTable
+          CONFIG_TABLE: !Ref ConfigTable
+          ANALYSIS_JOBS_TABLE: !Ref AnalysisJobsTable
+          CUSTOMER_SUPPRESSIONS_TABLE: !Ref CustomerSuppressionsTable
+          ANALYSIS_DLQ_ARN: !GetAtt AnalysisJobsDeadLetterQueue.Arn
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem]
+              Resource: !GetAtt LeadsTable.Arn
+            - Effect: Allow
+              Action: dynamodb:Query
+              Resource:
+                - !GetAtt LeadsTable.Arn
+                - !Sub "${LeadsTable.Arn}/index/*"
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem]
+              Resource: !GetAtt FollowupsTable.Arn
+            - Effect: Allow
+              Action: dynamodb:Query
+              Resource:
+                - !GetAtt FollowupsTable.Arn
+                - !Sub "${FollowupsTable.Arn}/index/*"
+            - Effect: Allow
+              Action: [dynamodb:PutItem, dynamodb:Query]
+              Resource:
+                - !GetAtt AuditTable.Arn
+                - !Sub "${AuditTable.Arn}/index/*"
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem]
+              Resource: !GetAtt ConfigTable.Arn
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:UpdateItem]
+              Resource: !GetAtt AnalysisJobsTable.Arn
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource: !GetAtt CustomerSuppressionsTable.Arn
+            - Effect: Allow
+              Action: dynamodb:TransactWriteItems
+              Resource:
+                - !GetAtt LeadsTable.Arn
+                - !GetAtt FollowupsTable.Arn
+                - !GetAtt AuditTable.Arn
+                - !GetAtt CustomerSuppressionsTable.Arn
+            - Effect: Allow
+              Action: bedrock:InvokeModel
+              Resource: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}"
+      Events:
+        AnalysisQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt AnalysisJobsQueue.Arn
+            BatchSize: 1
+            MaximumBatchingWindowInSeconds: 0
+        AnalysisDeadLetterQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt AnalysisJobsDeadLetterQueue.Arn
+            BatchSize: 1
+            MaximumBatchingWindowInSeconds: 0
+
+  LeadRescueLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${LeadRescueFunction}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  LeadRescueWorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${LeadRescueAnalysisWorker}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  LambdaErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-lambda-errors"
+      AlarmDescription: The LeadRescue API Lambda reported one or more errors in five minutes.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LeadRescueFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopicArn]
+
+  LambdaThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-lambda-throttles"
+      AlarmDescription: The LeadRescue API Lambda was throttled in five minutes.
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LeadRescueFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopicArn]
+
+  AnalysisWorkerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-analysis-worker-errors"
+      AlarmDescription: The LeadRescue analysis worker reported one or more errors in five minutes.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LeadRescueAnalysisWorker
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopicArn]
+
+  AnalysisWorkerThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-analysis-worker-throttles"
+      AlarmDescription: The LeadRescue analysis worker was throttled in five minutes.
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LeadRescueAnalysisWorker
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopicArn]
+
+  AnalysisQueueAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-analysis-queue-age"
+      AlarmDescription: Analysis jobs have waited more than five minutes for a worker.
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt AnalysisJobsQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 300
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopicArn]
+
+  AnalysisDeadLetterAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-analysis-dead-letter"
+      AlarmDescription: One or more analysis jobs require dead-letter queue investigation.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt AnalysisJobsDeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopicArn]
 
   # ============================================================
   # DynamoDB Tables — PAY_PER_REQUEST (free-tier friendly)
@@ -79,17 +445,49 @@ Resources:
     Properties:
       TableName: leadrescue-leads
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: lead_id
+          AttributeType: S
+        - AttributeName: tenant_id
           AttributeType: S
         - AttributeName: lifecycle_status
           AttributeType: S
         - AttributeName: created_at
           AttributeType: S
+        - AttributeName: tenant_email_key
+          AttributeType: S
+        - AttributeName: tenant_phone_key
+          AttributeType: S
       KeySchema:
         - AttributeName: lead_id
           KeyType: HASH
       GlobalSecondaryIndexes:
+        - IndexName: tenant-created-index
+          KeySchema:
+            - AttributeName: tenant_id
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: tenant-email-index
+          KeySchema:
+            - AttributeName: tenant_email_key
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: tenant-phone-index
+          KeySchema:
+            - AttributeName: tenant_phone_key
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
         - IndexName: status-index
           KeySchema:
             - AttributeName: lifecycle_status
@@ -104,8 +502,12 @@ Resources:
     Properties:
       TableName: leadrescue-followups
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: followup_id
+          AttributeType: S
+        - AttributeName: tenant_id
           AttributeType: S
         - AttributeName: lead_id
           AttributeType: S
@@ -117,6 +519,14 @@ Resources:
         - AttributeName: followup_id
           KeyType: HASH
       GlobalSecondaryIndexes:
+        - IndexName: tenant-due-index
+          KeySchema:
+            - AttributeName: tenant_id
+              KeyType: HASH
+            - AttributeName: due_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
         - IndexName: lead-index
           KeySchema:
             - AttributeName: lead_id
@@ -137,8 +547,12 @@ Resources:
     Properties:
       TableName: leadrescue-audit
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: audit_id
+          AttributeType: S
+        - AttributeName: tenant_lead_id
           AttributeType: S
         - AttributeName: lead_id
           AttributeType: S
@@ -148,6 +562,14 @@ Resources:
         - AttributeName: audit_id
           KeyType: HASH
       GlobalSecondaryIndexes:
+        - IndexName: tenant-lead-timestamp-index
+          KeySchema:
+            - AttributeName: tenant_lead_id
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
         - IndexName: lead-timestamp-index
           KeySchema:
             - AttributeName: lead_id
@@ -162,6 +584,8 @@ Resources:
     Properties:
       TableName: leadrescue-config
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: config_key
           AttributeType: S
@@ -169,10 +593,56 @@ Resources:
         - AttributeName: config_key
           KeyType: HASH
 
+  ProcessedEventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: leadrescue-processed-events
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: event_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: event_key
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+
+  CustomerSuppressionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: leadrescue-customer-suppressions
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: suppression_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: suppression_key
+          KeyType: HASH
+
+  AnalysisJobsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: leadrescue-analysis-jobs
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      AttributeDefinitions:
+        - AttributeName: job_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: job_id
+          KeyType: HASH
+
 Outputs:
   ApiEndpoint:
     Description: API Gateway endpoint URL
-    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+    Value: !Sub "https://${LeadRescueApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
   LeadRescueFunctionArn:
     Description: Lambda function ARN
     Value: !GetAtt LeadRescueFunction.Arn

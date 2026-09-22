@@ -1,463 +1,453 @@
-import React, { useState } from 'react';
-import { Search, Filter, Plus, Sparkles, ChevronRight, User, AlertTriangle } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Search, Plus, ChevronRight, ChevronLeft, Eye, Inbox } from 'lucide-react';
 import { PriorityBadge, RiskBadge, LifecycleBadge } from '../components/Common/Badge';
+import { PageHeader, EmptyState, Notice, BusyLabel, Avatar, Modal } from '../components/Common/UI';
+import { humanize, isPendingResponse, isOptedOut, relativeDue, timeOnly, safeError } from '../api/presentation';
 
-export function LeadInboxView({ leads, onSelectLead, onAnalyzeLead, onCreateLead }) {
-    const [searchTerm, setSearchTerm] = useState('');
+/** Channel values accepted by the create endpoint (existing API contract). */
+const CHANNELS = [
+    { value: 'whatsapp', label: 'WhatsApp' },
+    { value: 'website', label: 'Website' },
+    { value: 'email', label: 'Email' },
+    { value: 'phone', label: 'Phone' },
+    { value: 'marketplace', label: 'Marketplace' },
+    { value: 'manual', label: 'Manual' },
+];
+
+const PAGE_SIZES = [15, 25];
+const TABS = [
+    { id: 'all', label: 'All' },
+    { id: 'at_risk', label: 'At risk' },
+    { id: 'pending', label: 'Pending approval' },
+    { id: 'opted_out', label: 'Opted out' },
+];
+
+const normalize = value => (value == null ? '' : String(value).toLowerCase());
+const truncate = (text, max = 120) => (!text ? '' : text.length > max ? `${text.slice(0, max).trimEnd()}…` : text);
+const uniqueValues = values => [...new Set(values.filter(Boolean).map(value => normalize(value)))].sort();
+
+function CustomerCell({ lead }) {
+    return (
+        <div className="cell-customer">
+            <Avatar name={lead.customer_name} />
+            <span className="customer-text">
+                <span className="customer-name">{lead.customer_name || 'Unnamed lead'}</span>
+                <span className="customer-contact">{lead.customer_email || lead.customer_phone || 'No contact returned'}</span>
+            </span>
+            {lead.source && <span className="channel-chip">{humanize(lead.source)}</span>}
+        </div>
+    );
+}
+
+function MessageCell({ lead }) {
+    return (
+        <div className="cell-message">
+            <p className="message-text">{lead.raw_message ? truncate(lead.raw_message) : 'No message returned.'}</p>
+            {lead.intent && (
+                <span className="intent-line">
+                    <span className="intent-label">AI intent</span>{humanize(lead.intent)}
+                </span>
+            )}
+        </div>
+    );
+}
+
+function ScoreCell({ lead }) {
+    return (
+        <div className="cell-score">
+            {typeof lead.score === 'number'
+                ? <span className="score-value">{lead.score}<small>/100</small></span>
+                : <span className="score-pending">Unscored</span>}
+            <PriorityBadge priority={lead.priority} />
+        </div>
+    );
+}
+
+function StatusCell({ lead }) {
+    return (
+        <div className="cell-status">
+            <RiskBadge risk={lead.risk_status} />
+            <LifecycleBadge status={lead.lifecycle_status} />
+        </div>
+    );
+}
+
+function FollowupCell({ entry, now }) {
+    if (!entry) return <span className="muted-cell">None scheduled</span>;
+    return (
+        <div className="cell-followup">
+            <span>{relativeDue(entry.followup.due_at, now)}</span>
+            <small>{timeOnly(entry.followup.due_at)}</small>
+        </div>
+    );
+}
+
+export function LeadInboxView({ leads = [], followups, onSelectLead, onCreateLead, now, initialFilter, hasMore = false, loadingMore = false, onLoadMore, loadMoreError }) {
+    const [tab, setTab] = useState(() => (TABS.some(item => item.id === initialFilter) ? initialFilter : 'all'));
+    const [search, setSearch] = useState('');
     const [priorityFilter, setPriorityFilter] = useState('all');
-    const [riskFilter, setRiskFilter] = useState('all');
-    const [lifecycleFilter, setLifecycleFilter] = useState('all');
     const [sourceFilter, setSourceFilter] = useState('all');
+    const [lifecycleFilter, setLifecycleFilter] = useState('all');
+    const [page, setPage] = useState(1);
+    const [pageSize, setPageSize] = useState(PAGE_SIZES[0]);
 
-    const [showCreateModal, setShowCreateModal] = useState(false);
-    const [newLead, setNewLead] = useState({
-        customer_name: '',
-        customer_email: '',
-        customer_phone: '',
-        source: 'whatsapp',
-        raw_message: '',
-    });
+    const [showCreate, setShowCreate] = useState(false);
     const [submitting, setSubmitting] = useState(false);
+    const [formError, setFormError] = useState(null);
+    const [form, setForm] = useState({ customer_name: '', customer_email: '', customer_phone: '', source: 'whatsapp', raw_message: '' });
 
-    // Filter leads
-    const filteredLeads = leads.filter((lead) => {
-        // Search
-        const searchLower = searchTerm.toLowerCase();
-        const matchSearch =
-            !searchTerm ||
-            lead.customer_name?.toLowerCase().includes(searchLower) ||
-            lead.raw_message?.toLowerCase().includes(searchLower) ||
-            lead.product?.toLowerCase().includes(searchLower) ||
-            lead.location?.toLowerCase().includes(searchLower);
+    const query = normalize(search).trim();
 
-        // Priority filter
-        const matchPriority =
-            priorityFilter === 'all' || (lead.priority && lead.priority.toLowerCase() === priorityFilter);
+    const priorityOptions = useMemo(() => uniqueValues(leads.map(lead => lead.priority)), [leads]);
+    const sourceOptions = useMemo(() => uniqueValues(leads.map(lead => lead.source)), [leads]);
+    const lifecycleOptions = useMemo(() => uniqueValues(leads.map(lead => lead.lifecycle_status)), [leads]);
 
-        // Risk filter
-        const matchRisk =
-            riskFilter === 'all' || (lead.risk_status && lead.risk_status.toLowerCase() === riskFilter);
+    const tabCounts = useMemo(() => ({
+        all: leads.length,
+        at_risk: leads.filter(lead => normalize(lead.risk_status) === 'at_risk').length,
+        pending: leads.filter(isPendingResponse).length,
+        opted_out: leads.filter(isOptedOut).length,
+    }), [leads]);
 
-        // Lifecycle filter
-        const matchLifecycle =
-            lifecycleFilter === 'all' || (lead.lifecycle_status && lead.lifecycle_status.toLowerCase() === lifecycleFilter);
+    const nextFollowupByLead = useMemo(() => {
+        const map = new Map();
+        if (!Array.isArray(followups)) return map;
+        followups.forEach(followup => {
+            if (!followup || followup.lead_id == null) return;
+            if (['completed', 'cancelled', 'canceled', 'stopped', 'skipped'].includes(followup.status)) return;
+            const time = followup.due_at ? new Date(followup.due_at).getTime() : NaN;
+            if (!Number.isFinite(time)) return;
+            const existing = map.get(followup.lead_id);
+            if (!existing || time < existing.time) map.set(followup.lead_id, { time, followup });
+        });
+        return map;
+    }, [followups]);
 
-        // Source filter
-        const matchSource =
-            sourceFilter === 'all' || (lead.source && lead.source.toLowerCase() === sourceFilter);
+    const filtered = useMemo(() => leads.filter(lead => {
+        if (tab === 'at_risk' && normalize(lead.risk_status) !== 'at_risk') return false;
+        if (tab === 'pending' && !isPendingResponse(lead)) return false;
+        if (tab === 'opted_out' && !isOptedOut(lead)) return false;
+        if (priorityFilter !== 'all' && normalize(lead.priority) !== priorityFilter) return false;
+        if (sourceFilter !== 'all' && normalize(lead.source) !== sourceFilter) return false;
+        if (lifecycleFilter !== 'all' && normalize(lead.lifecycle_status) !== lifecycleFilter) return false;
+        if (query) {
+            const haystack = [
+                lead.customer_name,
+                lead.raw_message,
+                lead.product,
+                lead.location,
+                lead.customer_email,
+                lead.customer_phone,
+            ].filter(Boolean).join(' ').toLowerCase();
+            if (!haystack.includes(query)) return false;
+        }
+        return true;
+    }), [leads, tab, priorityFilter, sourceFilter, lifecycleFilter, query]);
 
-        return matchSearch && matchPriority && matchRisk && matchLifecycle && matchSource;
-    });
+    useEffect(() => { setPage(1); }, [tab, query, priorityFilter, sourceFilter, lifecycleFilter, pageSize]);
 
-    const handleCreateSubmit = async (e) => {
-        e.preventDefault();
-        if (!newLead.customer_name || !newLead.raw_message) {
-            alert('Customer Name and Raw Message are required.');
+    const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+    const currentPage = Math.min(page, totalPages);
+    const start = (currentPage - 1) * pageSize;
+    const rows = filtered.slice(start, start + pageSize);
+    const hasFilters = Boolean(query) || tab !== 'all' || priorityFilter !== 'all' || sourceFilter !== 'all' || lifecycleFilter !== 'all';
+
+    const clearFilters = () => {
+        setSearch('');
+        setTab('all');
+        setPriorityFilter('all');
+        setSourceFilter('all');
+        setLifecycleFilter('all');
+    };
+
+    const closeCreate = () => { if (!submitting) setShowCreate(false); };
+    const canSubmit = Boolean(form.customer_name.trim() && form.raw_message.trim());
+
+    const handleCreateSubmit = async event => {
+        event.preventDefault();
+        const customerName = form.customer_name.trim();
+        const rawMessage = form.raw_message.trim();
+        if (!customerName || !rawMessage) {
+            setFormError('Customer name and incoming message are required.');
             return;
         }
+
+        const payload = { customer_name: customerName, source: form.source, raw_message: rawMessage };
+        const email = form.customer_email.trim();
+        const phone = form.customer_phone.trim();
+        if (email) payload.customer_email = email;
+        if (phone) payload.customer_phone = phone;
+
         setSubmitting(true);
+        setFormError(null);
         try {
-            await onCreateLead(newLead);
-            setShowCreateModal(false);
-            setNewLead({
-                customer_name: '',
-                customer_email: '',
-                customer_phone: '',
-                source: 'whatsapp',
-                raw_message: '',
-            });
-        } catch (err) {
-            alert(`Failed to create lead: ${err.message}`);
+            await onCreateLead(payload);
+            setForm({ customer_name: '', customer_email: '', customer_phone: '', source: 'whatsapp', raw_message: '' });
+            setShowCreate(false);
+        } catch (error) {
+            setFormError(safeError(error, 'The lead could not be created. Review the form and try again.'));
         } finally {
             setSubmitting(false);
         }
     };
 
     return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-            {/* Header & New Lead Button */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <div>
-                    <h2 style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '0.2rem' }}>Lead Inbox</h2>
-                    <p style={{ fontSize: '0.875rem', color: 'var(--text-muted)' }}>
-                        Search, filter, and manage incoming operational lead inquiries.
-                    </p>
-                </div>
-
-                <button onClick={() => setShowCreateModal(true)} className="btn-primary">
-                    <Plus size={16} /> New Lead Entry
+        <div className="inbox-view">
+            <PageHeader
+                eyebrow="LEAD WORKSPACE"
+                title="Lead inbox"
+                description="Search and filter the loaded lead records. Continue loading pages to reach older inquiries."
+            >
+                {hasMore && <button type="button" className="btn-secondary" onClick={onLoadMore} disabled={loadingMore}>{loadingMore ? <BusyLabel>Loading…</BusyLabel> : 'Load next 50'}</button>}
+                <button type="button" className="btn-primary" onClick={() => { setFormError(null); setShowCreate(true); }}>
+                    <Plus size={16} /> New lead
                 </button>
-            </div>
+            </PageHeader>
 
-            {/* Filter Bar */}
-            <div className="panel" style={{ padding: '1rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
+            {loadMoreError && <Notice tone="error">{loadMoreError}</Notice>}
 
-                    {/* Search Box */}
-                    <div style={{
-                        flex: 1,
-                        minWidth: '240px',
-                        position: 'relative',
-                        display: 'flex',
-                        alignItems: 'center',
-                    }}>
-                        <Search size={16} color="var(--text-dim)" style={{ position: 'absolute', left: '12px' }} />
+            <section className="panel inbox-panel">
+                <div className="inbox-toolbar">
+                    <label className="inbox-search">
+                        <Search size={16} aria-hidden="true" />
+                        <span className="sr-only">Search leads</span>
                         <input
-                            type="text"
-                            placeholder="Search customer, message, product..."
-                            value={searchTerm}
-                            onChange={(e) => setSearchTerm(e.target.value)}
-                            style={{
-                                width: '100%',
-                                padding: '0.55rem 0.75rem 0.55rem 2.2rem',
-                                borderRadius: 'var(--radius-sm)',
-                                background: 'var(--bg-dark-0)',
-                                border: '1px solid var(--border-color)',
-                                color: 'var(--text-main)',
-                                fontSize: '0.875rem',
-                            }}
+                            type="search"
+                            value={search}
+                            onChange={event => setSearch(event.target.value)}
+                            placeholder="Search name, message, product, location or contact"
                         />
+                    </label>
+
+                    <div className="inbox-filters">
+                        <label className="filter-field">
+                            <span className="sr-only">Filter by priority</span>
+                            <select value={priorityFilter} onChange={event => setPriorityFilter(event.target.value)}>
+                                <option value="all">All priorities</option>
+                                {priorityOptions.map(value => <option key={value} value={value}>{humanize(value)}</option>)}
+                            </select>
+                        </label>
+                        <label className="filter-field">
+                            <span className="sr-only">Filter by channel</span>
+                            <select value={sourceFilter} onChange={event => setSourceFilter(event.target.value)}>
+                                <option value="all">All channels</option>
+                                {sourceOptions.map(value => <option key={value} value={value}>{humanize(value)}</option>)}
+                            </select>
+                        </label>
+                        <label className="filter-field">
+                            <span className="sr-only">Filter by lifecycle</span>
+                            <select value={lifecycleFilter} onChange={event => setLifecycleFilter(event.target.value)}>
+                                <option value="all">All lifecycle stages</option>
+                                {lifecycleOptions.map(value => <option key={value} value={value}>{humanize(value)}</option>)}
+                            </select>
+                        </label>
                     </div>
-
-                    {/* Priority Filter */}
-                    <select
-                        value={priorityFilter}
-                        onChange={(e) => setPriorityFilter(e.target.value)}
-                        style={{
-                            padding: '0.55rem 0.75rem',
-                            borderRadius: 'var(--radius-sm)',
-                            background: 'var(--bg-dark-0)',
-                            border: '1px solid var(--border-color)',
-                            color: 'var(--text-main)',
-                            fontSize: '0.85rem',
-                        }}
-                    >
-                        <option value="all">Priority: All</option>
-                        <option value="hot">HOT (80-100)</option>
-                        <option value="warm">WARM (50-79)</option>
-                        <option value="cold">COLD (0-49)</option>
-                    </select>
-
-                    {/* Risk Filter */}
-                    <select
-                        value={riskFilter}
-                        onChange={(e) => setRiskFilter(e.target.value)}
-                        style={{
-                            padding: '0.55rem 0.75rem',
-                            borderRadius: 'var(--radius-sm)',
-                            background: 'var(--bg-dark-0)',
-                            border: '1px solid var(--border-color)',
-                            color: 'var(--text-main)',
-                            fontSize: '0.85rem',
-                        }}
-                    >
-                        <option value="all">Risk: All</option>
-                        <option value="at_risk">AT RISK SLA</option>
-                        <option value="normal">NORMAL</option>
-                    </select>
-
-                    {/* Lifecycle Filter */}
-                    <select
-                        value={lifecycleFilter}
-                        onChange={(e) => setLifecycleFilter(e.target.value)}
-                        style={{
-                            padding: '0.55rem 0.75rem',
-                            borderRadius: 'var(--radius-sm)',
-                            background: 'var(--bg-dark-0)',
-                            border: '1px solid var(--border-color)',
-                            color: 'var(--text-main)',
-                            fontSize: '0.85rem',
-                        }}
-                    >
-                        <option value="all">Lifecycle: All</option>
-                        <option value="new">NEW</option>
-                        <option value="analyzed">ANALYZED</option>
-                        <option value="contacted">CONTACTED</option>
-                        <option value="follow_up">FOLLOW-UP</option>
-                        <option value="resolved">RESOLVED</option>
-                        <option value="opted_out">OPTED OUT</option>
-                    </select>
-
-                    {/* Source Filter */}
-                    <select
-                        value={sourceFilter}
-                        onChange={(e) => setSourceFilter(e.target.value)}
-                        style={{
-                            padding: '0.55rem 0.75rem',
-                            borderRadius: 'var(--radius-sm)',
-                            background: 'var(--bg-dark-0)',
-                            border: '1px solid var(--border-color)',
-                            color: 'var(--text-main)',
-                            fontSize: '0.85rem',
-                        }}
-                    >
-                        <option value="all">Source: All</option>
-                        <option value="whatsapp">WhatsApp</option>
-                        <option value="website">Website</option>
-                        <option value="email">Email</option>
-                        <option value="phone">Phone</option>
-                        <option value="marketplace">Marketplace</option>
-                        <option value="manual">Manual</option>
-                    </select>
-
                 </div>
-            </div>
 
-            {/* Leads Data Table */}
-            <div className="panel" style={{ padding: 0, overflow: 'hidden' }}>
-                {filteredLeads.length === 0 ? (
-                    <div style={{ padding: '3rem', textAlign: 'center', color: 'var(--text-muted)' }}>
-                        <p style={{ fontSize: '1rem', marginBottom: '0.5rem' }}>No leads match these filters.</p>
-                        <span style={{ fontSize: '0.8rem', color: 'var(--text-dim)' }}>
-                            Try clearing filters or search query to view all available leads.
-                        </span>
-                    </div>
+                <div className="inbox-tabs" role="group" aria-label="Lead quick filters">
+                    {TABS.map(item => (
+                        <button
+                            key={item.id}
+                            type="button"
+                            className={`inbox-tab ${tab === item.id ? 'is-active' : ''}`}
+                            aria-pressed={tab === item.id}
+                            onClick={() => setTab(item.id)}
+                        >
+                            {item.label}<span className="tab-count">{tabCounts[item.id]}</span>
+                        </button>
+                    ))}
+                </div>
+
+                {leads.length === 0 ? (
+                    <EmptyState
+                        icon={Inbox}
+                        title="No leads yet"
+                        description="The API returned an empty lead list. Create the first lead to get started."
+                    >
+                        <button type="button" className="btn-primary" onClick={() => { setFormError(null); setShowCreate(true); }}>
+                            <Plus size={16} /> New lead
+                        </button>
+                    </EmptyState>
+                ) : filtered.length === 0 ? (
+                    <EmptyState
+                        icon={Search}
+                        title="No leads match these filters"
+                        description="Adjust the search or filters to see more leads."
+                    >
+                        {hasFilters && (
+                            <button type="button" className="btn-secondary" onClick={clearFilters}>Clear filters</button>
+                        )}
+                    </EmptyState>
                 ) : (
-                    <div className="data-table-container">
-                        <table className="data-table">
-                            <thead>
-                                <tr>
-                                    <th>Customer</th>
-                                    <th>Source</th>
-                                    <th>Message / Intent</th>
-                                    <th>Score</th>
-                                    <th>Priority</th>
-                                    <th>Risk</th>
-                                    <th>Lifecycle</th>
-                                    <th>Action</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {filteredLeads.map((lead) => (
-                                    <tr
-                                        key={lead.lead_id}
-                                        onClick={() => onSelectLead(lead.lead_id)}
-                                        style={{ cursor: 'pointer' }}
-                                    >
-                                        <td>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-                                                <div style={{
-                                                    width: '32px',
-                                                    height: '32px',
-                                                    borderRadius: '50%',
-                                                    background: 'var(--bg-dark-2)',
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    justifyContent: 'center',
-                                                    fontWeight: 600,
-                                                    fontSize: '0.85rem',
-                                                }}>
-                                                    {lead.customer_name ? lead.customer_name.charAt(0) : <User size={14} />}
-                                                </div>
-                                                <div>
-                                                    <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>{lead.customer_name}</div>
-                                                    <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>{lead.customer_email || lead.customer_phone || 'No contact'}</span>
-                                                </div>
-                                            </div>
-                                        </td>
-
-                                        <td>
-                                            <span className="badge-sub">{lead.source?.toUpperCase()}</span>
-                                        </td>
-
-                                        <td style={{ maxWidth: '300px' }}>
-                                            <p style={{ fontSize: '0.825rem', color: 'var(--text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', margin: 0 }}>
-                                                {lead.raw_message}
-                                            </p>
-                                            {lead.intent && (
-                                                <span style={{ fontSize: '0.7rem', color: 'var(--accent-primary)', fontWeight: 500 }}>
-                                                    Intent: {lead.intent}
-                                                </span>
-                                            )}
-                                        </td>
-
-                                        <td>
-                                            {lead.score !== null ? (
-                                                <span style={{ fontWeight: 700, fontFamily: 'var(--font-heading)', color: 'var(--accent-primary)', fontSize: '1rem' }}>
-                                                    {lead.score}
-                                                </span>
-                                            ) : (
-                                                <span style={{ color: 'var(--text-dim)', fontSize: '0.8rem' }}>—</span>
-                                            )}
-                                        </td>
-
-                                        <td>
-                                            <PriorityBadge priority={lead.priority} />
-                                        </td>
-
-                                        <td>
-                                            <RiskBadge risk={lead.risk_status} />
-                                        </td>
-
-                                        <td>
-                                            <LifecycleBadge status={lead.lifecycle_status} />
-                                        </td>
-
-                                        <td>
-                                            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                                                {lead.lifecycle_status === 'new' ? (
-                                                    <button
-                                                        onClick={(e) => { e.stopPropagation(); onAnalyzeLead(lead.lead_id); }}
-                                                        className="btn-primary"
-                                                        style={{ fontSize: '0.75rem', padding: '0.3rem 0.6rem' }}
-                                                    >
-                                                        <Sparkles size={12} /> Analyze
-                                                    </button>
-                                                ) : (
-                                                    <button className="btn-secondary" style={{ fontSize: '0.75rem', padding: '0.3rem 0.6rem' }}>
-                                                        View Detail
-                                                    </button>
-                                                )}
-                                            </div>
-                                        </td>
+                    <>
+                        <div className="inbox-table-wrap">
+                            <table className="data-table inbox-table">
+                                <thead>
+                                    <tr>
+                                        <th scope="col">Customer</th>
+                                        <th scope="col">Message &amp; intent</th>
+                                        <th scope="col">Score &amp; priority</th>
+                                        <th scope="col">Risk &amp; lifecycle</th>
+                                        <th scope="col">Next follow-up</th>
+                                        <th scope="col"><span className="sr-only">Actions</span></th>
                                     </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                )}
-            </div>
-
-            {/* New Lead Entry Modal */}
-            {showCreateModal && (
-                <div style={{
-                    position: 'fixed',
-                    top: 0, left: 0, right: 0, bottom: 0,
-                    background: 'rgba(0, 0, 0, 0.7)',
-                    backdropFilter: 'blur(4px)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    zIndex: 1000,
-                }}>
-                    <div className="panel" style={{ width: '100%', maxWidth: '500px', background: 'var(--bg-dark-1)' }}>
-                        <div className="panel-header">
-                            <div className="panel-title">Create New Lead Entry</div>
-                            <button onClick={() => setShowCreateModal(false)} style={{ color: 'var(--text-muted)' }}>✕</button>
+                                </thead>
+                                <tbody>
+                                    {rows.map(lead => (
+                                        <tr key={lead.lead_id}>
+                                            <td><CustomerCell lead={lead} /></td>
+                                            <td><MessageCell lead={lead} /></td>
+                                            <td><ScoreCell lead={lead} /></td>
+                                            <td><StatusCell lead={lead} /></td>
+                                            <td><FollowupCell entry={nextFollowupByLead.get(lead.lead_id)} now={now} /></td>
+                                            <td className="cell-action">
+                                                <button type="button" className="btn-secondary btn-sm" onClick={() => onSelectLead?.(lead.lead_id)}>
+                                                    <Eye size={14} /> View
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
                         </div>
 
-                        <form onSubmit={handleCreateSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                            <div>
-                                <label style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: '0.3rem' }}>
-                                    Customer Name *
+                        <ul className="inbox-cards">
+                            {rows.map(lead => (
+                                <li key={lead.lead_id} className="inbox-card">
+                                    <div className="inbox-card-head"><CustomerCell lead={lead} /></div>
+                                    <MessageCell lead={lead} />
+                                    <div className="inbox-card-meta">
+                                        <ScoreCell lead={lead} />
+                                        <StatusCell lead={lead} />
+                                    </div>
+                                    <div className="inbox-card-foot">
+                                        <FollowupCell entry={nextFollowupByLead.get(lead.lead_id)} now={now} />
+                                        <button type="button" className="btn-secondary btn-sm" onClick={() => onSelectLead?.(lead.lead_id)}>
+                                            <Eye size={14} /> View
+                                        </button>
+                                    </div>
+                                </li>
+                            ))}
+                        </ul>
+
+                        <div className="pagination">
+                            <span className="pagination-info">
+                                Showing {start + 1}–{Math.min(start + pageSize, filtered.length)} of {filtered.length} loaded
+                            </span>
+                            <label className="page-size">
+                                <span className="sr-only">Rows per page</span>
+                                <select value={pageSize} onChange={event => setPageSize(Number(event.target.value))}>
+                                    {PAGE_SIZES.map(size => <option key={size} value={size}>{size} per page</option>)}
+                                </select>
+                            </label>
+                            <div className="pagination-controls">
+                                <button
+                                    type="button"
+                                    className="btn-secondary btn-sm"
+                                    onClick={() => setPage(value => Math.max(1, value - 1))}
+                                    disabled={currentPage <= 1}
+                                >
+                                    <ChevronLeft size={14} /> Previous
+                                </button>
+                                <span className="pagination-page">Page {currentPage} of {totalPages}</span>
+                                <button
+                                    type="button"
+                                    className="btn-secondary btn-sm"
+                                    onClick={() => setPage(value => Math.min(totalPages, value + 1))}
+                                    disabled={currentPage >= totalPages}
+                                >
+                                    Next <ChevronRight size={14} />
+                                </button>
+                            </div>
+                        </div>
+                    </>
+                )}
+            </section>
+
+            {showCreate && (
+                <Modal
+                    title="New lead"
+                    description="Record an incoming inquiry. It is analysed once created."
+                    onClose={closeCreate}
+                    busy={submitting}
+                >
+                    <form className="modal-form" onSubmit={handleCreateSubmit}>
+                        {formError && <Notice tone="error">{formError}</Notice>}
+
+                        <div className="form-field">
+                            <label className="field-label" htmlFor="lead-name">
+                                Customer name <span className="required-mark" aria-hidden="true">*</span>
+                            </label>
+                            <input
+                                id="lead-name"
+                                type="text"
+                                required
+                                autoComplete="name"
+                                value={form.customer_name}
+                                onChange={event => setForm({ ...form, customer_name: event.target.value })}
+                            />
+                        </div>
+
+                        <div className="form-grid">
+                            <div className="form-field">
+                                <label className="field-label" htmlFor="lead-email">
+                                    Email <span className="field-optional">optional</span>
                                 </label>
                                 <input
-                                    type="text"
-                                    required
-                                    placeholder="e.g. Ramesh Chandra"
-                                    value={newLead.customer_name}
-                                    onChange={(e) => setNewLead({ ...newLead, customer_name: e.target.value })}
-                                    style={{
-                                        width: '100%',
-                                        padding: '0.6rem',
-                                        borderRadius: 'var(--radius-sm)',
-                                        background: 'var(--bg-dark-0)',
-                                        border: '1px solid var(--border-color)',
-                                        color: 'var(--text-main)',
-                                    }}
+                                    id="lead-email"
+                                    type="email"
+                                    autoComplete="email"
+                                    value={form.customer_email}
+                                    onChange={event => setForm({ ...form, customer_email: event.target.value })}
                                 />
                             </div>
-
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                                <div>
-                                    <label style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: '0.3rem' }}>
-                                        Email Address
-                                    </label>
-                                    <input
-                                        type="email"
-                                        placeholder="ramesh@example.com"
-                                        value={newLead.customer_email}
-                                        onChange={(e) => setNewLead({ ...newLead, customer_email: e.target.value })}
-                                        style={{
-                                            width: '100%',
-                                            padding: '0.6rem',
-                                            borderRadius: 'var(--radius-sm)',
-                                            background: 'var(--bg-dark-0)',
-                                            border: '1px solid var(--border-color)',
-                                            color: 'var(--text-main)',
-                                        }}
-                                    />
-                                </div>
-
-                                <div>
-                                    <label style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: '0.3rem' }}>
-                                        Phone Number
-                                    </label>
-                                    <input
-                                        type="text"
-                                        placeholder="+91-9876543210"
-                                        value={newLead.customer_phone}
-                                        onChange={(e) => setNewLead({ ...newLead, customer_phone: e.target.value })}
-                                        style={{
-                                            width: '100%',
-                                            padding: '0.6rem',
-                                            borderRadius: 'var(--radius-sm)',
-                                            background: 'var(--bg-dark-0)',
-                                            border: '1px solid var(--border-color)',
-                                            color: 'var(--text-main)',
-                                        }}
-                                    />
-                                </div>
-                            </div>
-
-                            <div>
-                                <label style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: '0.3rem' }}>
-                                    Channel Source
+                            <div className="form-field">
+                                <label className="field-label" htmlFor="lead-phone">
+                                    Phone <span className="field-optional">optional</span>
                                 </label>
-                                <select
-                                    value={newLead.source}
-                                    onChange={(e) => setNewLead({ ...newLead, source: e.target.value })}
-                                    style={{
-                                        width: '100%',
-                                        padding: '0.6rem',
-                                        borderRadius: 'var(--radius-sm)',
-                                        background: 'var(--bg-dark-0)',
-                                        border: '1px solid var(--border-color)',
-                                        color: 'var(--text-main)',
-                                    }}
-                                >
-                                    <option value="whatsapp">WhatsApp</option>
-                                    <option value="website">Website</option>
-                                    <option value="email">Email</option>
-                                    <option value="phone">Phone</option>
-                                    <option value="marketplace">Marketplace</option>
-                                    <option value="manual">Manual</option>
-                                </select>
-                            </div>
-
-                            <div>
-                                <label style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: '0.3rem' }}>
-                                    Raw Customer Message *
-                                </label>
-                                <textarea
-                                    rows={3}
-                                    required
-                                    placeholder="Paste incoming lead message text..."
-                                    value={newLead.raw_message}
-                                    onChange={(e) => setNewLead({ ...newLead, raw_message: e.target.value })}
-                                    style={{
-                                        width: '100%',
-                                        padding: '0.6rem',
-                                        borderRadius: 'var(--radius-sm)',
-                                        background: 'var(--bg-dark-0)',
-                                        border: '1px solid var(--border-color)',
-                                        color: 'var(--text-main)',
-                                        resize: 'vertical',
-                                    }}
+                                <input
+                                    id="lead-phone"
+                                    type="tel"
+                                    autoComplete="tel"
+                                    value={form.customer_phone}
+                                    onChange={event => setForm({ ...form, customer_phone: event.target.value })}
                                 />
                             </div>
+                        </div>
 
-                            <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end', marginTop: '0.5rem' }}>
-                                <button type="button" onClick={() => setShowCreateModal(false)} className="btn-secondary">
-                                    Cancel
-                                </button>
-                                <button type="submit" disabled={submitting} className="btn-primary">
-                                    {submitting ? 'Creating...' : 'Create Lead'}
-                                </button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
+                        <div className="form-field">
+                            <label className="field-label" htmlFor="lead-source">Channel</label>
+                            <select
+                                id="lead-source"
+                                value={form.source}
+                                onChange={event => setForm({ ...form, source: event.target.value })}
+                            >
+                                {CHANNELS.map(channel => <option key={channel.value} value={channel.value}>{channel.label}</option>)}
+                            </select>
+                        </div>
+
+                        <div className="form-field">
+                            <label className="field-label" htmlFor="lead-message">
+                                Incoming message <span className="required-mark" aria-hidden="true">*</span>
+                            </label>
+                            <textarea
+                                id="lead-message"
+                                rows={4}
+                                required
+                                placeholder="Paste the customer's message exactly as received"
+                                value={form.raw_message}
+                                onChange={event => setForm({ ...form, raw_message: event.target.value })}
+                            />
+                        </div>
+
+                        <div className="modal-actions">
+                            <button type="button" className="btn-secondary" onClick={closeCreate} disabled={submitting}>Cancel</button>
+                            <button type="submit" className="btn-primary" disabled={submitting || !canSubmit}>
+                                {submitting ? <BusyLabel>Creating…</BusyLabel> : 'Create lead'}
+                            </button>
+                        </div>
+                    </form>
+                </Modal>
             )}
         </div>
     );

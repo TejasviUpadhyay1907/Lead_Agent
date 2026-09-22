@@ -1,183 +1,240 @@
-import React, { useState } from 'react';
-import { Clock, CheckCircle, AlertTriangle, ChevronRight, Calendar, Check } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { CalendarClock, Check, ChevronRight, AlertTriangle, RefreshCw, Inbox } from 'lucide-react';
 import { PriorityBadge } from '../components/Common/Badge';
+import { PageHeader, EmptyState, ErrorState, Notice, Skeleton, BusyLabel } from '../components/Common/UI';
 import { api } from '../api/client';
+import { followupBucket, relativeDue, dateTime, humanize, isBlocked, safeError } from '../api/presentation';
 
-export function FollowupsView({ followups, leads, onSelectLead, onRefreshLeads }) {
-    const [activeTab, setActiveTab] = useState('due');
-    const [updatingId, setUpdatingId] = useState(null);
+/** Tabs mirror the API-owned follow-up states. Nothing is inferred from names or ordering. */
+const TABS = [
+    { id: 'all', label: 'All' },
+    { id: 'due', label: 'Due' },
+    { id: 'overdue', label: 'Overdue' },
+    { id: 'upcoming', label: 'Upcoming' },
+    { id: 'completed', label: 'Completed' },
+    { id: 'stopped', label: 'Stopped' },
+];
 
-    const handleComplete = async (e, followupId) => {
-        e.stopPropagation(); // prevent opening lead detail view
-        setUpdatingId(followupId);
+const TAB_BUCKETS = {
+    due: ['due', 'overdue'],
+    overdue: ['overdue'],
+    upcoming: ['upcoming'],
+    completed: ['completed'],
+    stopped: ['stopped'],
+};
+
+const EMPTY_COPY = {
+    all: 'No follow-ups are available yet. Scheduled outreach appears here once the policy engine creates it.',
+    due: 'No follow-ups are due or overdue right now.',
+    overdue: 'No follow-ups are currently overdue.',
+    upcoming: 'No follow-ups are scheduled for later.',
+    completed: 'No follow-ups have been completed yet.',
+    stopped: 'No follow-ups are stopped or cancelled.',
+};
+
+export function FollowupsView({ followups, leads, onSelectLead, onRefreshLeads, now, error, onRetry, hasMore = false, loadingMore = false, onLoadMore, loadMoreError }) {
+    const [activeTab, setActiveTab] = useState('all');
+    const [pendingId, setPendingId] = useState(null);
+    const [refreshing, setRefreshing] = useState(false);
+    const [notice, setNotice] = useState(null);
+    const [actionError, setActionError] = useState(null);
+
+    const ready = Array.isArray(followups) && Array.isArray(leads);
+
+    /** One pass over the data: resolve the lead (if known) and bucket the follow-up. */
+    const rows = useMemo(() => {
+        if (!ready) return [];
+        const leadsById = new Map(leads.map(lead => [lead.lead_id, lead]));
+        return followups.map(followup => {
+            const lead = leadsById.get(followup.lead_id) || null;
+            return {
+                followup,
+                lead,
+                leadKnown: Boolean(lead),
+                bucket: followupBucket(followup, lead, now),
+            };
+        });
+    }, [followups, leads, now, ready]);
+
+    const counts = useMemo(() => {
+        const totals = { all: rows.length, due: 0, overdue: 0, upcoming: 0, completed: 0, stopped: 0 };
+        rows.forEach(({ bucket }) => {
+            if (bucket === 'overdue') {
+                totals.overdue += 1;
+                totals.due += 1;
+            } else if (bucket === 'due') {
+                totals.due += 1;
+            } else if (Object.prototype.hasOwnProperty.call(totals, bucket)) {
+                totals[bucket] += 1;
+            }
+        });
+        return totals;
+    }, [rows]);
+
+    const visibleRows = useMemo(() => {
+        if (activeTab === 'all') return rows;
+        const allowed = TAB_BUCKETS[activeTab] || [];
+        return rows.filter(row => allowed.includes(row.bucket));
+    }, [rows, activeTab]);
+
+    const headerDescription = 'Scheduled outreach created by the policy engine. Only scheduled or overdue follow-ups on known, unblocked leads can be actioned.';
+
+    const handleRefresh = async () => {
+        if (!onRefreshLeads) return;
+        setRefreshing(true);
+        setActionError(null);
+        setNotice(null);
         try {
-            await api.updateFollowup(followupId, 'completed', 'Marked completed from Follow-ups Console');
-            if (onRefreshLeads) onRefreshLeads();
-        } catch (err) {
-            alert(`Failed to update follow-up: ${err.message}`);
+            await onRefreshLeads();
+            setNotice({ tone: 'success', text: 'Follow-ups refreshed from the server.' });
+        } catch (refreshError) {
+            setActionError(safeError(refreshError, 'The follow-up list could not be refreshed.'));
         } finally {
-            setUpdatingId(null);
+            setRefreshing(false);
         }
     };
 
-    // Map followups with lead info
-    const enrichedFollowups = followups.map((f) => {
-        const lead = leads.find((l) => l.lead_id === f.lead_id);
-        return {
-            ...f,
-            customer_name: lead?.customer_name || 'Unknown Customer',
-            priority: lead?.priority || 'COLD',
-            risk_status: lead?.risk_status || 'normal',
-            lifecycle_status: lead?.lifecycle_status || 'analyzed',
-        };
-    });
-
-    const dueFollowups = enrichedFollowups.filter((f) => f.status === 'scheduled' || f.status === 'overdue');
-    const completedFollowups = enrichedFollowups.filter((f) => f.status === 'completed');
-    const blockedFollowups = enrichedFollowups.filter((f) => f.lifecycle_status === 'opted_out' || f.lifecycle_status === 'resolved');
-
-    const getDisplayedFollowups = () => {
-        if (activeTab === 'due') return dueFollowups;
-        if (activeTab === 'completed') return completedFollowups;
-        if (activeTab === 'blocked') return blockedFollowups;
-        return enrichedFollowups;
+    const handleComplete = async (followupId, leadName) => {
+        setPendingId(followupId);
+        setActionError(null);
+        setNotice(null);
+        try {
+            await api.updateFollowup(followupId, 'completed', 'Marked completed from the Follow-ups view');
+            if (onRefreshLeads) await onRefreshLeads();
+            setNotice({ tone: 'success', text: `Follow-up${leadName ? ` for ${leadName}` : ''} marked completed.` });
+        } catch (updateError) {
+            setActionError(safeError(updateError, 'The follow-up could not be updated. Refresh the list and try again.'));
+        } finally {
+            setPendingId(null);
+        }
     };
 
-    const displayedList = getDisplayedFollowups();
+    if (!ready) {
+        return (
+            <div className="view-stack">
+                <PageHeader eyebrow="Operations" title="Follow-ups" description={headerDescription} />
+                <Skeleton rows={5} label="Loading follow-ups…" />
+            </div>
+        );
+    }
+
+    if (error) {
+        return (
+            <div className="view-stack">
+                <PageHeader eyebrow="Operations" title="Follow-ups" description={headerDescription} />
+                <ErrorState
+                    title="Unable to load follow-ups"
+                    description={typeof error === 'string' ? error : safeError(error)}
+                    onRetry={onRetry}
+                />
+            </div>
+        );
+    }
 
     return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-            {/* Header */}
-            <div>
-                <h2 style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '0.2rem' }}>Follow-up Operations Center</h2>
-                <p style={{ fontSize: '0.875rem', color: 'var(--text-muted)' }}>
-                    Automated and scheduled customer follow-up actions generated by Policy Engine.
-                </p>
-            </div>
-
-            {/* Tabs Bar */}
-            <div style={{ display: 'flex', gap: '0.5rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.5rem' }}>
-                <button
-                    onClick={() => setActiveTab('due')}
-                    className={`btn-secondary ${activeTab === 'due' ? 'active' : ''}`}
-                    style={{
-                        background: activeTab === 'due' ? 'var(--bg-dark-2)' : 'transparent',
-                        borderColor: activeTab === 'due' ? 'var(--accent-primary)' : 'transparent',
-                        fontWeight: activeTab === 'due' ? 600 : 500,
-                    }}
-                >
-                    <Clock size={16} color="var(--color-warm)" /> Due / Active ({dueFollowups.length})
-                </button>
-
-                <button
-                    onClick={() => setActiveTab('completed')}
-                    className={`btn-secondary ${activeTab === 'completed' ? 'active' : ''}`}
-                    style={{
-                        background: activeTab === 'completed' ? 'var(--bg-dark-2)' : 'transparent',
-                        borderColor: activeTab === 'completed' ? 'var(--accent-primary)' : 'transparent',
-                        fontWeight: activeTab === 'completed' ? 600 : 500,
-                    }}
-                >
-                    <CheckCircle size={16} color="var(--color-success)" /> Completed ({completedFollowups.length})
-                </button>
-
-                <button
-                    onClick={() => setActiveTab('blocked')}
-                    className={`btn-secondary ${activeTab === 'blocked' ? 'active' : ''}`}
-                    style={{
-                        background: activeTab === 'blocked' ? 'var(--bg-dark-2)' : 'transparent',
-                        borderColor: activeTab === 'blocked' ? 'var(--accent-primary)' : 'transparent',
-                        fontWeight: activeTab === 'blocked' ? 600 : 500,
-                    }}
-                >
-                    <AlertTriangle size={16} color="var(--color-hot)" /> Blocked / Opted Out ({blockedFollowups.length})
-                </button>
-            </div>
-
-            {/* Follow-up Cards List */}
-            <div className="panel" style={{ padding: '1rem' }}>
-                {displayedList.length === 0 ? (
-                    <div style={{ padding: '3rem', textAlign: 'center', color: 'var(--text-dim)' }}>
-                        No follow-ups currently found in this category.
-                    </div>
-                ) : (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
-                        {displayedList.map((item) => (
-                            <div
-                                key={item.followup_id}
-                                onClick={() => onSelectLead(item.lead_id)}
-                                style={{
-                                    padding: '1rem',
-                                    borderRadius: 'var(--radius-sm)',
-                                    background: 'var(--bg-dark-0)',
-                                    border: '1px solid var(--border-color)',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'space-between',
-                                    cursor: 'pointer',
-                                    transition: 'border-color 0.15s ease',
-                                }}
-                                onMouseEnter={(e) => e.currentTarget.style.borderColor = 'var(--accent-primary)'}
-                                onMouseLeave={(e) => e.currentTarget.style.borderColor = 'var(--border-color)'}
-                            >
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flex: 1 }}>
-                                    <div style={{
-                                        width: '40px',
-                                        height: '40px',
-                                        borderRadius: 'var(--radius-sm)',
-                                        background: 'var(--bg-dark-2)',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        justifyContent: 'center',
-                                        color: 'var(--accent-primary)',
-                                    }}>
-                                        <Calendar size={20} />
-                                    </div>
-
-                                    <div>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.2rem' }}>
-                                            <span style={{ fontWeight: 600, fontSize: '0.95rem' }}>{item.customer_name}</span>
-                                            <PriorityBadge priority={item.priority} />
-                                            <span className="badge-sub">{item.status.toUpperCase()}</span>
-                                        </div>
-
-                                        <p style={{ fontSize: '0.875rem', color: 'var(--text-main)', margin: 0, fontWeight: 500 }}>
-                                            Action: {item.action}
-                                        </p>
-                                        {item.notes && (
-                                            <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)', display: 'block', marginTop: '0.1rem' }}>
-                                                Notes: {item.notes}
-                                            </span>
-                                        )}
-                                    </div>
-                                </div>
-
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem' }}>
-                                    <div style={{ textAlign: 'right' }}>
-                                        <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)', display: 'block' }}>DUE TIMESTAMP</span>
-                                        <span style={{ fontSize: '0.85rem', fontFamily: 'var(--font-mono)', color: 'var(--color-warm)' }}>
-                                            {new Date(item.due_at).toLocaleString()}
-                                        </span>
-                                    </div>
-
-                                    {item.status !== 'completed' && item.lifecycle_status !== 'opted_out' && (
-                                        <button
-                                            onClick={(e) => handleComplete(e, item.followup_id)}
-                                            disabled={updatingId === item.followup_id}
-                                            className="btn-secondary"
-                                            style={{ padding: '0.4rem 0.65rem', fontSize: '0.8rem', color: 'var(--color-success)', borderColor: 'var(--border-success)' }}
-                                        >
-                                            <Check size={14} /> Complete
-                                        </button>
-                                    )}
-
-                                    <ChevronRight size={18} color="var(--text-dim)" />
-                                </div>
-                            </div>
-                        ))}
-                    </div>
+        <div className="view-stack">
+            <PageHeader eyebrow="Operations" title="Follow-ups" description={headerDescription}>
+                <span className="badge-sub">{counts.due} due or overdue</span>
+                {onRefreshLeads && (
+                    <button type="button" className="btn-secondary" onClick={handleRefresh} disabled={refreshing}>
+                        {refreshing ? <BusyLabel>Refreshing…</BusyLabel> : <><RefreshCw size={15} aria-hidden="true" /> Refresh</>}
+                    </button>
                 )}
+                {hasMore && <button type="button" className="btn-secondary" onClick={onLoadMore} disabled={loadingMore}>{loadingMore ? <BusyLabel>Loading…</BusyLabel> : 'Load next 50'}</button>}
+            </PageHeader>
+
+            {loadMoreError && <Notice tone="error">{loadMoreError}</Notice>}
+
+            <div className="tabs" role="tablist" aria-label="Filter follow-ups by state">
+                {TABS.map(tab => (
+                    <button
+                        key={tab.id}
+                        type="button"
+                        role="tab"
+                        id={`followups-tab-${tab.id}`}
+                        aria-selected={activeTab === tab.id}
+                        aria-controls="followups-panel"
+                        className={`tab ${activeTab === tab.id ? 'active' : ''}`}
+                        onClick={() => setActiveTab(tab.id)}
+                    >
+                        {tab.label}
+                        <span className="tab-count">{counts[tab.id]}</span>
+                    </button>
+                ))}
             </div>
+
+            {notice && <Notice tone={notice.tone}>{notice.text}</Notice>}
+            {actionError && <Notice tone="error">{actionError}</Notice>}
+
+            <section className="panel" id="followups-panel" role="tabpanel" aria-labelledby={`followups-tab-${activeTab}`}>
+                {visibleRows.length === 0 ? (
+                    <EmptyState icon={Inbox} title="Nothing in this view" description={EMPTY_COPY[activeTab]} />
+                ) : (
+                    <ul className="followup-list">
+                        {visibleRows.map(({ followup, lead, leadKnown, bucket }) => {
+                            const isOverdue = bucket === 'overdue';
+                            const isActionable = leadKnown && !isBlocked(lead) && (bucket === 'due' || bucket === 'overdue');
+                            const canOpen = Boolean(onSelectLead && followup.lead_id);
+                            const reason = !leadKnown
+                                ? 'Lead record not loaded — action unavailable'
+                                : isBlocked(lead)
+                                    ? `Lead is ${humanize(lead.lifecycle_status).toLowerCase()} — outreach blocked`
+                                    : null;
+
+                            return (
+                                <li className="followup-card" key={followup.followup_id}>
+                                    <button
+                                        type="button"
+                                        className="followup-open"
+                                        onClick={() => canOpen && onSelectLead(followup.lead_id)}
+                                        disabled={!canOpen}
+                                    >
+                                        <span className="followup-icon" aria-hidden="true"><CalendarClock size={18} /></span>
+
+                                        <span className="followup-main">
+                                            <span className="followup-title">
+                                                <span className="followup-name">{leadKnown ? (lead.customer_name || 'Unnamed lead') : 'Unknown lead'}</span>
+                                                {lead?.priority && <PriorityBadge priority={lead.priority} />}
+                                                <span className="badge-sub">{humanize(followup.status)}</span>
+                                                {isOverdue && (
+                                                    <span className="badge badge-hot"><AlertTriangle size={12} aria-hidden="true" /> Overdue</span>
+                                                )}
+                                            </span>
+                                            <span className="followup-action">{humanize(followup.action)}</span>
+                                            {followup.notes && <span className="followup-notes">{followup.notes}</span>}
+                                        </span>
+
+                                        <span className="followup-side">
+                                            <span className="due-label">Due</span>
+                                            <span className={`due-value ${isOverdue ? 'overdue' : ''}`}>{relativeDue(followup.due_at, now)}</span>
+                                            <span className="due-absolute">{dateTime(followup.due_at)}</span>
+                                        </span>
+
+                                        <ChevronRight className="followup-chevron" size={18} aria-hidden="true" />
+                                    </button>
+
+                                    <div className="followup-actions">
+                                        {isActionable ? (
+                                            <button
+                                                type="button"
+                                                className="btn-secondary btn-sm followup-complete"
+                                                disabled={pendingId === followup.followup_id}
+                                                onClick={() => handleComplete(followup.followup_id, lead.customer_name)}
+                                            >
+                                                {pendingId === followup.followup_id
+                                                    ? <BusyLabel>Completing…</BusyLabel>
+                                                    : <><Check size={14} aria-hidden="true" /> Complete</>}
+                                            </button>
+                                        ) : reason ? (
+                                            <span className="followup-blocked">{reason}</span>
+                                        ) : null}
+                                    </div>
+                                </li>
+                            );
+                        })}
+                    </ul>
+                )}
+            </section>
         </div>
     );
 }

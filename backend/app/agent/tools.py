@@ -57,26 +57,16 @@ def get_customer_history(customer_email: Optional[str] = None, customer_phone: O
         return []
 
     leads_repo = get_leads_repo()
-    all_leads = leads_repo.list_leads()
-
-    history = []
-    for l in all_leads:
-        match = False
-        if customer_email and l.customer_email == customer_email:
-            match = True
-        elif customer_phone and l.customer_phone == customer_phone:
-            match = True
-
-        if match:
-            history.append({
-                "lead_id": l.lead_id,
-                "created_at": l.created_at,
-                "source": l.source.value if hasattr(l.source, "value") else str(l.source),
-                "summary": l.ai_summary or l.raw_message[:100],
-                "lifecycle_status": l.lifecycle_status.value if hasattr(l.lifecycle_status, "value") else str(l.lifecycle_status),
-            })
-
-    return history
+    return [
+        {
+            "lead_id": lead.lead_id,
+            "created_at": lead.created_at,
+            "source": lead.source.value if hasattr(lead.source, "value") else str(lead.source),
+            "summary": lead.ai_summary or lead.raw_message[:100],
+            "lifecycle_status": lead.lifecycle_status.value if hasattr(lead.lifecycle_status, "value") else str(lead.lifecycle_status),
+        }
+        for lead in leads_repo.find_customer_history(customer_email, customer_phone)
+    ]
 
 
 @tool

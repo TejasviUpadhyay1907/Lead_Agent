@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict
 from pydantic import BaseModel, ConfigDict, Field
+from app.config.settings import settings
 
 
 def utc_now_iso() -> str:
@@ -23,6 +24,8 @@ class AuditEventCreate(BaseModel):
 
 class AuditEvent(AuditEventCreate):
     audit_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    tenant_id: str = Field(default_factory=lambda: settings.effective_tenant_id)
+    tenant_lead_id: str = ""
     timestamp: str = Field(default_factory=utc_now_iso)
 
     model_config = ConfigDict(extra="ignore", from_attributes=True)

@@ -35,15 +35,17 @@
               │                                │
               ▼                                ▼
         Amazon Bedrock                     DynamoDB
-              │                          ┌────┬────┬────┐
-              ▼                          │    │    │    │
-       Structured                      Leads Fups Audit Config
+              │                          ┌────┬────┬────┬────┐
+              ▼                          │    │    │    │    │
+       Structured                      Leads Fups Audit Config Events
        AI Result
               │                        Human Approval UI
               └───── → Pydantic ────→  [Approve] [Edit] [Reject]
                       Validation
-                                       CloudWatch (logs)
+                                      CloudWatch (logs)
 ```
+
+The API gateway exposes two ingress paths: OIDC bearer-authenticated `/api/*` product routes and `/integrations/v1/leads`, which uses timestamp-bound HMAC verification and transactional idempotency. The webhook secret is read from Secrets Manager; event keys expire after 30 days.
 
 ## AI vs Deterministic Boundary
 
@@ -115,7 +117,8 @@ Classification: 80–100=HOT, 50–79=WARM, 0–49=COLD
 | API Gateway | API entry point |
 | Lambda | Backend execution |
 | Bedrock | Foundation model inference |
-| DynamoDB | Application data (4 tables) |
+| DynamoDB | Leads, follow-ups, audit, config, and processed webhook events |
+| Secrets Manager | HMAC secret for signed inbound source-system webhooks |
 | CloudWatch | Observability |
 | IAM | Least-privilege access |
 | SAM | Infrastructure-as-code |
@@ -127,4 +130,14 @@ Classification: 80–100=HOT, 50–79=WARM, 0–49=COLD
 - Agent is read-only — no mutation authority
 - Human approval required for customer-facing actions
 - Synthetic/demo data only
+
+### Production Access Boundary
+
+- Every `/api` route requires an OIDC RS256 bearer access token with the configured issuer, audience, API scope, and tenant claim.
+- The deployment checks the token tenant claim against `TENANT_ID`; the initial commercial topology is one isolated stack per customer. A shared SaaS runtime that chooses tenant context per request is not implemented.
+- Lead, follow-up, and audit records store tenant keys and are read through tenant-scoped GSIs; lead/follow-up writes enforce tenant ownership. Existing records require the documented backfill before new query paths can see them.
+- Lead and follow-up writes require the configured operator or admin role. Business configuration changes require the configured admin role.
+- Demo mode is limited to local/test environments; production always requires authentication and disables seed/clock endpoints.
+- CORS origins, OIDC issuer/JWKS, audience, scope, tenant, and role claim values must be set for the customer's environment.
+- Browser sign-in uses OIDC Authorization Code with PKCE; access tokens are memory-only and sign-out redirects to the provider when supported. Configure the provider's allowed origins/redirect URI and validate token refresh behavior in staging before production rollout.
 - Pydantic validation on all inputs and agent outputs

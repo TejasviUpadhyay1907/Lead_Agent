@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from app.config.settings import settings
 
 from app.models.enums import (
     CustomerStageEnum,
@@ -27,9 +28,9 @@ def utc_now_iso() -> str:
 class LeadBase(BaseModel):
     customer_name: str = Field(..., min_length=1, max_length=200)
     customer_email: Optional[EmailStr] = None
-    customer_phone: Optional[str] = None
+    customer_phone: Optional[str] = Field(default=None, max_length=64)
     source: SourceEnum = SourceEnum.WEBSITE
-    raw_message: str = Field(..., min_length=1)
+    raw_message: str = Field(..., min_length=1, max_length=20000)
     assigned_to: Optional[str] = None
 
 
@@ -47,6 +48,7 @@ class LeadUpdate(BaseModel):
     assigned_to: Optional[str] = None
     lifecycle_status: Optional[LifecycleStatusEnum] = None
     response_status: Optional[ResponseStatusEnum] = None
+    last_analysis_job_id: Optional[str] = None
     response_draft: Optional[str] = None
     model_config = ConfigDict(extra="forbid")
 
@@ -54,6 +56,7 @@ class LeadUpdate(BaseModel):
 class Lead(LeadBase):
     """Full Lead domain model stored in DynamoDB"""
     lead_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    tenant_id: str = Field(default_factory=lambda: settings.effective_tenant_id)
     created_at: str = Field(default_factory=utc_now_iso)
     updated_at: str = Field(default_factory=utc_now_iso)
 

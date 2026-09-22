@@ -35,3 +35,11 @@ Thumbs.db
 
 # Build artifacts
 frontend/dist/
+frontend/tmp/
+frontend/build.log
+frontend/error.txt
+frontend/node_modules - Copy/
+frontend/dist - Copy/
+frontend/package-lock - Copy.json
+backend/pytest.log
+outputs/audit-baseline-build/

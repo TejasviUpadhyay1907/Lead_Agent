@@ -1,205 +1,386 @@
-import React from 'react';
-import { Flame, AlertTriangle, Clock, Inbox, CheckCircle2, ChevronRight, Sparkles, User } from 'lucide-react';
-import { PriorityBadge, RiskBadge, LifecycleBadge } from '../components/Common/Badge';
+import React, { useState } from 'react';
+import {
+    Inbox, Flame, AlertTriangle, Clock, CalendarClock, ChevronRight,
+    Sparkles, Zap, TrendingUp, UserCheck, Activity,
+} from 'lucide-react';
+import { PriorityBadge, RiskBadge } from '../components/Common/Badge';
 import { StatCard } from '../components/Common/StatCard';
+import {
+    PageHeader, SectionHeader, WorkflowStrip, EmptyState, ErrorState, Notice, BusyLabel, Avatar,
+} from '../components/Common/UI';
+import { humanize, isPendingResponse, dateTime, timeOnly, relativeDue, followupBucket, safeError } from '../api/presentation';
 
-export function DashboardView({ leads, followups, onSelectLead, onSeedData, onAnalyzeLead }) {
-    const totalLeads = leads.length;
-    const hotLeads = leads.filter(l => l.priority && l.priority.toLowerCase() === 'hot').length;
-    const warmLeads = leads.filter(l => l.priority && l.priority.toLowerCase() === 'warm').length;
-    const coldLeads = leads.filter(l => l.priority && l.priority.toLowerCase() === 'cold').length;
-    const atRiskLeads = leads.filter(l => l.risk_status && l.risk_status.toLowerCase() === 'at_risk').length;
-    const pendingResponses = leads.filter(l => l.response_status === 'draft').length;
-    const followupsDue = followups.filter(f => f.status === 'scheduled' || f.status === 'overdue').length;
+const normalize = value => (value == null ? '' : String(value).toLowerCase());
+const scoreOf = lead => (typeof lead.score === 'number' ? lead.score : null);
+const recencyOf = lead => {
+    const time = lead.created_at ? new Date(lead.created_at).getTime() : NaN;
+    return Number.isFinite(time) ? time : 0;
+};
+const byScoreThenRecency = (a, b) => {
+    const diff = (scoreOf(b) ?? -1) - (scoreOf(a) ?? -1);
+    return diff !== 0 ? diff : recencyOf(b) - recencyOf(a);
+};
+const truncate = (text, max = 150) => {
+    if (!text) return '';
+    return text.length > max ? `${text.slice(0, max).trimEnd()}…` : text;
+};
 
-    // Leads needing attention: AT_RISK leads or HOT/WARM leads with draft response or unanalyzed
-    const needsAttention = leads.filter(l =>
-        (l.risk_status && l.risk_status.toLowerCase() === 'at_risk') ||
-        (l.priority && (l.priority.toLowerCase() === 'hot' || l.priority.toLowerCase() === 'warm') && l.lifecycle_status !== 'resolved' && l.lifecycle_status !== 'opted_out') ||
-        l.lifecycle_status === 'new'
-    ).slice(0, 5);
+/** Backend decides risk, priority and score. This only ranks the returned values. */
+function attentionRank(lead) {
+    if (normalize(lead.risk_status) === 'at_risk') return 0;
+    if (isPendingResponse(lead)) return 1;
+    if (normalize(lead.lifecycle_status) === 'new') return 2;
+    return 3;
+}
+const attentionReason = lead => {
+    if (normalize(lead.risk_status) === 'at_risk') return 'At risk';
+    if (isPendingResponse(lead)) return 'Draft awaiting approval';
+    return 'New inquiry';
+};
+const priorityTone = key => (['hot', 'warm', 'cold'].includes(key) ? key : 'neutral');
+
+export function DashboardView({
+    leads = [],
+    followups,
+    onSelectLead,
+    onSeedData,
+    demoMode = false,
+    onNavigate,
+    now,
+    followupsError,
+    onRetryFollowups,
+}) {
+    const [seeding, setSeeding] = useState(false);
+    const [seedError, setSeedError] = useState(null);
+
+    const total = leads.length;
+    const hot = leads.filter(lead => normalize(lead.priority) === 'hot').length;
+    const atRisk = leads.filter(lead => normalize(lead.risk_status) === 'at_risk').length;
+    const pending = leads.filter(isPendingResponse).length;
+
+    const leadById = new Map(leads.map(lead => [lead.lead_id, lead]));
+    const followupsKnown = Array.isArray(followups) && !followupsError;
+
+    // "Due" is only meaningful with a clock and a returned follow-up list.
+    const dueCount = followupsKnown && now
+        ? followups.filter(followup => ['due', 'overdue'].includes(followupBucket(followup, leadById.get(followup.lead_id), now))).length
+        : null;
+
+    // Priority distribution — categories come from returned priorities only.
+    const scoredLeads = leads.filter(lead => lead.priority);
+    const unscored = total - scoredLeads.length;
+    const priorityCounts = new Map();
+    scoredLeads.forEach(lead => {
+        const key = normalize(lead.priority);
+        priorityCounts.set(key, (priorityCounts.get(key) || 0) + 1);
+    });
+    const knownOrder = ['hot', 'warm', 'cold'];
+    const categories = [...priorityCounts.keys()].sort((a, b) => {
+        const rankA = knownOrder.indexOf(a);
+        const rankB = knownOrder.indexOf(b);
+        return (rankA === -1 ? 99 : rankA) - (rankB === -1 ? 99 : rankB) || a.localeCompare(b);
+    });
+
+    const attention = leads
+        .filter(lead => attentionRank(lead) < 3)
+        .sort((a, b) => attentionRank(a) - attentionRank(b) || byScoreThenRecency(a, b));
+    const attentionShown = attention.slice(0, 6);
+    const approvalQueue = leads.filter(isPendingResponse).sort(byScoreThenRecency);
+
+    const upcoming = followupsKnown
+        ? followups
+            .map(followup => ({ followup, lead: leadById.get(followup.lead_id), bucket: followupBucket(followup, leadById.get(followup.lead_id), now) }))
+            .filter(item => ['upcoming', 'due', 'overdue'].includes(item.bucket))
+            .sort((a, b) => (new Date(a.followup.due_at).getTime() || 0) - (new Date(b.followup.due_at).getTime() || 0))
+        : [];
+
+    const arrivals = leads
+        .filter(lead => lead.created_at && Number.isFinite(new Date(lead.created_at).getTime()))
+        .sort((a, b) => recencyOf(b) - recencyOf(a))
+        .slice(0, 5);
+
+    const handleSeed = async () => {
+        if (!onSeedData) return;
+        setSeeding(true);
+        setSeedError(null);
+        try {
+            await onSeedData();
+        } catch (error) {
+            setSeedError(safeError(error, 'The demo leads could not be loaded. Check the API and try again.'));
+        } finally {
+            setSeeding(false);
+        }
+    };
 
     return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-            {/* Top Banner if no leads */}
-            {totalLeads === 0 && (
-                <div className="panel" style={{ borderLeft: '4px solid var(--accent-primary)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <div>
-                        <h3 style={{ fontSize: '1.1rem', marginBottom: '0.25rem' }}>Welcome to LeadRescue AI Dashboard</h3>
-                        <p style={{ fontSize: '0.875rem', color: 'var(--text-muted)' }}>
-                            No leads currently in database. Click below to seed the 5 canonical Phase 0 demo leads.
-                        </p>
-                    </div>
-                    <button onClick={onSeedData} className="btn-primary">
-                        <Sparkles size={16} /> Seed Canonical Demo Leads
-                    </button>
-                </div>
-            )}
+        <div className="dashboard-view">
+            <PageHeader
+                eyebrow="OPERATIONS OVERVIEW"
+                title="Every lead. In view."
+                description="Priority, risk and scores are shown exactly as the API returns them."
+            >
+                <button type="button" className="btn-secondary" onClick={() => onNavigate?.('inbox')}>
+                    Open lead inbox <ChevronRight size={16} />
+                </button>
+            </PageHeader>
 
-            {/* Top Metrics Cards Grid */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
-                <StatCard title="Total Leads" value={totalLeads} subtext="Incoming Lead Inquiries" icon={Inbox} color="var(--accent-primary)" />
-                <StatCard title="HOT Leads" value={hotLeads} subtext="High Commercial Intent" icon={Flame} color="var(--color-hot)" />
-                <StatCard title="At Risk SLA" value={atRiskLeads} subtext="Response Target Exceeded" icon={AlertTriangle} color="var(--color-at-risk)" />
-                <StatCard title="Pending Responses" value={pendingResponses} subtext="Awaiting Human Approval" icon={Clock} color="var(--color-warm)" />
-                <StatCard title="Follow-ups Due" value={followupsDue} subtext="Scheduled Tasks" icon={CheckCircle2} color="var(--color-success)" />
-            </div>
+            <WorkflowStrip />
 
-            {/* Main Grid: Needs Attention & Analytics */}
-            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '1.5rem' }}>
+            {seedError && <Notice tone="error">{seedError}</Notice>}
 
-                {/* Needs Attention Priority Section */}
-                <div className="panel">
-                    <div className="panel-header">
-                        <div className="panel-title">
-                            <AlertTriangle size={18} color="var(--color-warm)" />
-                            Needs Immediate Attention
-                        </div>
-                        <span className="badge-sub">{needsAttention.length} Actionable Leads</span>
-                    </div>
+            {total === 0 ? (
+                <EmptyState
+                    icon={Sparkles}
+                    title="No leads in the workspace yet"
+                    description={demoMode ? "The API returned an empty lead list. Load the synthetic examples to explore the workspace, or create your own from the inbox." : "New inquiries will appear here when they arrive through your configured channels. Add a lead from the inbox to get started."}
+                >
+                    {demoMode && <button type="button" className="btn-primary" onClick={handleSeed} disabled={seeding}>
+                        {seeding ? <BusyLabel>Loading demo leads…</BusyLabel> : <><Sparkles size={16} /> Load demo leads</>}
+                    </button>}
+                </EmptyState>
+            ) : (
+                <>
+                    <section className="metric-strip" aria-label="Operational metrics">
+                        <StatCard label="Leads loaded" value={total} hint="Current server pages" icon={Inbox} tone="neutral" onClick={() => onNavigate?.('inbox')} />
+                        <StatCard label="Hot leads" value={hot} hint="In loaded lead pages" icon={Flame} tone="hot" />
+                        <StatCard label="At risk" value={atRisk} hint="In loaded lead pages" icon={AlertTriangle} tone="risk" />
+                        <StatCard label="Pending approval" value={pending} hint="Drafts awaiting a person" icon={Clock} tone="pending" />
+                        <StatCard
+                            label="Follow-ups due"
+                            value={dueCount === null ? 'Unavailable' : dueCount}
+                            hint={dueCount === null ? 'Clock or follow-up data unavailable' : 'Due or overdue now'}
+                            icon={CalendarClock}
+                            tone="due"
+                            unavailable={dueCount === null}
+                        />
+                    </section>
 
-                    {needsAttention.length === 0 ? (
-                        <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-dim)' }}>
-                            No leads currently require urgent attention.
-                        </div>
-                    ) : (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
-                            {needsAttention.map((lead) => (
-                                <div
-                                    key={lead.lead_id}
-                                    onClick={() => onSelectLead(lead.lead_id)}
-                                    style={{
-                                        padding: '1rem',
-                                        borderRadius: 'var(--radius-sm)',
-                                        background: 'var(--bg-dark-0)',
-                                        border: lead.risk_status === 'at_risk' ? '1px solid var(--border-at-risk)' : '1px solid var(--border-color)',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        justifyContent: 'space-between',
-                                        cursor: 'pointer',
-                                        transition: 'all 0.15s ease',
-                                    }}
-                                    onMouseEnter={(e) => e.currentTarget.style.borderColor = 'var(--accent-primary)'}
-                                    onMouseLeave={(e) => e.currentTarget.style.borderColor = lead.risk_status === 'at_risk' ? 'var(--border-at-risk)' : 'var(--border-color)'}
+                    <div className="dashboard-grid">
+                        <div className="dashboard-main">
+                            <section className="panel">
+                                <SectionHeader
+                                    icon={Zap}
+                                    title="Attention queue"
+                                    subtitle="At risk first, then drafts and new inquiries"
+                                    layer="policy"
                                 >
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flex: 1 }}>
-                                        <div style={{
-                                            width: '40px',
-                                            height: '40px',
-                                            borderRadius: '50%',
-                                            background: 'var(--bg-dark-2)',
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            justifyContent: 'center',
-                                            fontWeight: 600,
-                                            color: 'var(--text-main)',
-                                        }}>
-                                            {lead.customer_name ? lead.customer_name.charAt(0) : <User size={18} />}
+                                    <span className="badge-sub">{attention.length} leads</span>
+                                </SectionHeader>
+
+                                {attentionShown.length === 0 ? (
+                                    <p className="panel-note">Nothing needs attention right now.</p>
+                                ) : (
+                                    <ul className="attention-list">
+                                        {attentionShown.map(lead => {
+                                            const rank = attentionRank(lead);
+                                            const state = rank === 0 ? 'is-at-risk' : rank === 1 ? 'is-pending' : 'is-new';
+                                            return (
+                                                <li key={lead.lead_id} className={`attention-item ${state}`}>
+                                                    <Avatar name={lead.customer_name} />
+                                                    <div className="attention-body">
+                                                        <div className="attention-head">
+                                                            <span className="attention-name">{lead.customer_name || 'Unnamed lead'}</span>
+                                                            <PriorityBadge priority={lead.priority} />
+                                                            <RiskBadge risk={lead.risk_status} />
+                                                        </div>
+                                                        <p className="attention-message">
+                                                            {lead.raw_message ? truncate(lead.raw_message) : 'No message returned.'}
+                                                        </p>
+                                                        <div className="attention-meta">
+                                                            <span className={`attention-reason ${state}`}>{attentionReason(lead)}</span>
+                                                            {lead.intent && <span className="attention-intent">{humanize(lead.intent)}</span>}
+                                                        </div>
+                                                    </div>
+                                                    <div className="attention-side">
+                                                        {scoreOf(lead) !== null
+                                                            ? <span className="attention-score">{lead.score}<small>/100</small></span>
+                                                            : <span className="score-pending">Unscored</span>}
+                                                        <button type="button" className="btn-secondary btn-sm" onClick={() => onSelectLead?.(lead.lead_id)}>
+                                                            View <ChevronRight size={14} />
+                                                        </button>
+                                                    </div>
+                                                </li>
+                                            );
+                                        })}
+                                    </ul>
+                                )}
+
+                                <div className="panel-footer">
+                                    <button type="button" className="btn-secondary btn-sm" onClick={() => onNavigate?.('inbox')}>
+                                        Open inbox <ChevronRight size={14} />
+                                    </button>
+                                </div>
+                            </section>
+                        </div>
+
+                        <aside className="dashboard-side">
+                            <section className="panel">
+                                <SectionHeader
+                                    icon={TrendingUp}
+                                    title="Priority distribution"
+                                    subtitle="Segments reflect returned priorities"
+                                    layer="policy"
+                                />
+                                {scoredLeads.length === 0 ? (
+                                    <p className="panel-note">No scored leads have been returned yet.</p>
+                                ) : (
+                                    <>
+                                        <div
+                                            className="distribution-bar"
+                                            role="img"
+                                            aria-label={categories.map(key => `${humanize(key)}: ${priorityCounts.get(key)}`).join(', ')}
+                                        >
+                                            {categories.map(key => (
+                                                <span
+                                                    key={key}
+                                                    className={`distribution-segment seg-${priorityTone(key)}`}
+                                                    style={{ width: `${(priorityCounts.get(key) / scoredLeads.length) * 100}%` }}
+                                                />
+                                            ))}
                                         </div>
+                                        <ul className="distribution-legend">
+                                            {categories.map(key => (
+                                                <li key={key} className="legend-item">
+                                                    <span className={`legend-swatch seg-${priorityTone(key)}`} aria-hidden="true" />
+                                                    <span className="legend-label">{humanize(key)}</span>
+                                                    <span className="legend-count">{priorityCounts.get(key)}</span>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    </>
+                                )}
+                                {unscored > 0 && (
+                                    <p className="distribution-note">
+                                        {unscored} {unscored === 1 ? 'lead is' : 'leads are'} unscored and excluded from this distribution.
+                                    </p>
+                                )}
+                            </section>
 
-                                        <div style={{ flex: 1, minWidth: 0 }}>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.2rem' }}>
-                                                <span style={{ fontWeight: 600, fontSize: '0.95rem' }}>{lead.customer_name}</span>
-                                                <PriorityBadge priority={lead.priority} />
-                                                <RiskBadge risk={lead.risk_status} />
-                                                <LifecycleBadge status={lead.lifecycle_status} />
-                                            </div>
-                                            <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                                "{lead.raw_message}"
-                                            </p>
-                                        </div>
-                                    </div>
+                            <section className="panel">
+                                <SectionHeader
+                                    icon={UserCheck}
+                                    title="Human approval"
+                                    subtitle="Drafts only send after a person approves"
+                                    layer="human"
+                                >
+                                    <span className="badge-sub">{pending} pending</span>
+                                </SectionHeader>
 
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginLeft: '1rem' }}>
-                                        {lead.score !== null && (
-                                            <div style={{ textAlign: 'right' }}>
-                                                <span style={{ fontSize: '1.1rem', fontWeight: 700, fontFamily: 'var(--font-heading)', color: 'var(--accent-primary)' }}>
-                                                    {lead.score}
-                                                </span>
-                                                <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)', display: 'block' }}>/100</span>
-                                            </div>
-                                        )}
-                                        {lead.lifecycle_status === 'new' ? (
-                                            <button
-                                                onClick={(e) => { e.stopPropagation(); onAnalyzeLead(lead.lead_id); }}
-                                                className="btn-primary"
-                                                style={{ fontSize: '0.75rem', padding: '0.35rem 0.75rem' }}
-                                            >
-                                                <Sparkles size={12} /> Analyze
-                                            </button>
-                                        ) : (
-                                            <ChevronRight size={18} color="var(--text-dim)" />
-                                        )}
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    )}
-                </div>
+                                {approvalQueue.length === 0 ? (
+                                    <p className="panel-note">No drafts are waiting for approval.</p>
+                                ) : (
+                                    <ul className="approval-list">
+                                        {approvalQueue.slice(0, 4).map(lead => (
+                                            <li key={lead.lead_id} className="approval-item">
+                                                <button type="button" className="approval-link" onClick={() => onSelectLead?.(lead.lead_id)}>
+                                                    <span className="approval-name">{lead.customer_name || 'Unnamed lead'}</span>
+                                                    <span className="approval-meta">
+                                                        {humanize(lead.response_status)} · {lead.priority ? humanize(lead.priority) : 'Unscored'}
+                                                    </span>
+                                                </button>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                )}
 
-                {/* Priority & Risk Distribution Overview */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                                <div className="panel-footer">
+                                    <button type="button" className="btn-secondary btn-sm" onClick={() => onNavigate?.('inbox')}>
+                                        Review in inbox <ChevronRight size={14} />
+                                    </button>
+                                </div>
+                            </section>
 
-                    <div className="panel">
-                        <div className="panel-header">
-                            <div className="panel-title">Priority Breakdown</div>
-                        </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                            <div>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: '0.25rem' }}>
-                                    <span style={{ color: 'var(--color-hot)', fontWeight: 600 }}>HOT (80-100)</span>
-                                    <span>{hotLeads} leads</span>
+                            <section className="panel">
+                                <SectionHeader
+                                    icon={CalendarClock}
+                                    title="Upcoming follow-ups"
+                                    subtitle="Scheduled by the policy engine"
+                                    layer="policy"
+                                />
+                                {followupsError ? (
+                                    <ErrorState
+                                        title="Follow-ups unavailable"
+                                        description="The follow-up list did not load, so nothing is shown here."
+                                        onRetry={onRetryFollowups}
+                                    />
+                                ) : upcoming.length === 0 ? (
+                                    <p className="panel-note">No follow-ups are scheduled.</p>
+                                ) : (
+                                    <ul className="followup-mini-list">
+                                        {upcoming.slice(0, 5).map(({ followup, lead }) => (
+                                            <li key={followup.followup_id} className="followup-mini">
+                                                <div className="followup-mini-body">
+                                                    <span className="followup-mini-name">{lead?.customer_name || 'Unnamed lead'}</span>
+                                                    <span className="followup-mini-action">
+                                                        {followup.action ? humanize(followup.action) : 'Follow-up'}
+                                                    </span>
+                                                </div>
+                                                <div className="followup-mini-time">
+                                                    <span>{relativeDue(followup.due_at, now)}</span>
+                                                    <small>{timeOnly(followup.due_at)}</small>
+                                                </div>
+                                                {lead && (
+                                                    <button
+                                                        type="button"
+                                                        className="icon-button"
+                                                        aria-label={`Open ${lead.customer_name || 'lead'}`}
+                                                        onClick={() => onSelectLead?.(followup.lead_id)}
+                                                    >
+                                                        <ChevronRight size={16} />
+                                                    </button>
+                                                )}
+                                            </li>
+                                        ))}
+                                    </ul>
+                                )}
+                                <div className="panel-footer">
+                                    <button type="button" className="btn-secondary btn-sm" onClick={() => onNavigate?.('followups')}>
+                                        Open follow-ups <ChevronRight size={14} />
+                                    </button>
                                 </div>
-                                <div style={{ height: '6px', background: 'var(--bg-dark-2)', borderRadius: 'var(--radius-full)', overflow: 'hidden' }}>
-                                    <div style={{ width: `${totalLeads ? (hotLeads / totalLeads) * 100 : 0}%`, height: '100%', background: 'var(--color-hot)' }} />
-                                </div>
-                            </div>
+                            </section>
 
-                            <div>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: '0.25rem' }}>
-                                    <span style={{ color: 'var(--color-warm)', fontWeight: 600 }}>WARM (50-79)</span>
-                                    <span>{warmLeads} leads</span>
+                            <section className="panel">
+                                <SectionHeader
+                                    icon={Activity}
+                                    title="Recent arrivals"
+                                    subtitle="Newest inquiries by returned timestamp"
+                                />
+                                {arrivals.length === 0 ? (
+                                    <p className="panel-note">No arrival timestamps were returned.</p>
+                                ) : (
+                                    <ul className="arrivals-list">
+                                        {arrivals.map(lead => (
+                                            <li key={lead.lead_id} className="arrival-item">
+                                                <Avatar name={lead.customer_name} />
+                                                <div className="arrival-body">
+                                                    <span className="arrival-name">{lead.customer_name || 'Unnamed lead'}</span>
+                                                    <span className="arrival-meta">
+                                                        {lead.source ? humanize(lead.source) : 'Channel not returned'} · {dateTime(lead.created_at)}
+                                                    </span>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    className="icon-button"
+                                                    aria-label={`Open ${lead.customer_name || 'lead'}`}
+                                                    onClick={() => onSelectLead?.(lead.lead_id)}
+                                                >
+                                                    <ChevronRight size={16} />
+                                                </button>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                )}
+                                <div className="panel-footer">
+                                    <button type="button" className="btn-secondary btn-sm" onClick={() => onNavigate?.('activity')}>
+                                        View activity <ChevronRight size={14} />
+                                    </button>
                                 </div>
-                                <div style={{ height: '6px', background: 'var(--bg-dark-2)', borderRadius: 'var(--radius-full)', overflow: 'hidden' }}>
-                                    <div style={{ width: `${totalLeads ? (warmLeads / totalLeads) * 100 : 0}%`, height: '100%', background: 'var(--color-warm)' }} />
-                                </div>
-                            </div>
-
-                            <div>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: '0.25rem' }}>
-                                    <span style={{ color: 'var(--color-cold)', fontWeight: 600 }}>COLD (0-49)</span>
-                                    <span>{coldLeads} leads</span>
-                                </div>
-                                <div style={{ height: '6px', background: 'var(--bg-dark-2)', borderRadius: 'var(--radius-full)', overflow: 'hidden' }}>
-                                    <div style={{ width: `${totalLeads ? (coldLeads / totalLeads) * 100 : 0}%`, height: '100%', background: 'var(--color-cold)' }} />
-                                </div>
-                            </div>
-                        </div>
+                            </section>
+                        </aside>
                     </div>
-
-                    <div className="panel">
-                        <div className="panel-header">
-                            <div className="panel-title">SLA & Operational Status</div>
-                        </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', fontSize: '0.85rem' }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.4rem 0', borderBottom: '1px solid var(--border-color)' }}>
-                                <span style={{ color: 'var(--text-muted)' }}>Response Target SLA:</span>
-                                <span style={{ fontWeight: 600 }}>20 Minutes</span>
-                            </div>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.4rem 0', borderBottom: '1px solid var(--border-color)' }}>
-                                <span style={{ color: 'var(--text-muted)' }}>High-Value Threshold:</span>
-                                <span style={{ fontWeight: 600 }}>$50,000</span>
-                            </div>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.4rem 0' }}>
-                                <span style={{ color: 'var(--text-muted)' }}>Opt-Out Safeguard:</span>
-                                <span style={{ color: 'var(--color-success)', fontWeight: 600 }}>Active</span>
-                            </div>
-                        </div>
-                    </div>
-
-                </div>
-
-            </div>
+                </>
+            )}
         </div>
     );
 }

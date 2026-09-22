@@ -3,24 +3,31 @@ LeadRescue AI — Leads API Endpoints
 Endpoints for lead creation, listing, detailed retrieval, AI analysis, response approval, rescue, and status updates.
 """
 
+import json
+import re
 from typing import List, Optional
 from datetime import timedelta
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
+import boto3
 from pydantic import BaseModel, Field
 
 from app.agent.lead_agent import LeadRescueAgent
 from app.api.deps import get_audit_repo, get_config_repo, get_followups_repo, get_leads_repo
+from app.api.security import require_roles
+from app.config.settings import settings
 from app.models.audit import AuditEventCreate
 from app.models.enums import FollowUpStatusEnum, LifecycleStatusEnum, PriorityEnum, ResponseStatusEnum, RiskStatusEnum, SourceEnum
-from app.models.followup import FollowUpCreate
+from app.models.followup import FollowUp, FollowUpCreate
 from app.models.lead import Lead, LeadCreate
 from app.policy.engine import PolicyEngine
 from app.policy.risk import evaluate_risk
 from app.repositories.audit import AuditRepository
 from app.repositories.config import ConfigRepository
 from app.repositories.followups import FollowUpsRepository
-from app.repositories.leads import LeadsRepository
+from app.repositories.leads import ConcurrentLeadUpdateError, LeadsRepository
+from app.repositories.analysis_jobs import repository as analysis_jobs_repo
 from app.utils.time import effective_now
+from app.policy.guardrails import check_opt_out
 
 router = APIRouter(prefix="/leads", tags=["Leads"])
 
@@ -36,9 +43,20 @@ class UpdateStatusRequest(BaseModel):
     reason: Optional[str] = None
 
 
+class AnalysisJobResponse(BaseModel):
+    job_id: str
+    lead_id: str
+    status: str
+    created_at: str
+    updated_at: str
+    error_code: Optional[str] = None
+    result: Optional[Lead] = None
+
+
 @router.post("", response_model=Lead, status_code=status.HTTP_201_CREATED)
-async def create_lead(
+def create_lead(
     lead_in: LeadCreate,
+    _operator=Depends(require_roles(settings.operator_role, settings.admin_role)),
     leads_repo: LeadsRepository = Depends(get_leads_repo),
     audit_repo: AuditRepository = Depends(get_audit_repo),
 ):
@@ -46,37 +64,37 @@ async def create_lead(
     Create a new incoming lead.
     Creates lead record and logs an audit event.
     """
-    lead = leads_repo.create(lead_in)
-
-    # Opt-out check on raw message (e.g. Lead 5 Sunita Rao)
-    raw_lower = lead_in.raw_message.lower()
-    if any(phrase in raw_lower for phrase in ["remove me", "unsubscribe", "stop contact", "opt out", "don't contact"]):
+    lead = Lead(**lead_in.model_dump())
+    opted_out_in_message, _ = check_opt_out(lead_in.raw_message)
+    if opted_out_in_message or leads_repo.customer_opted_out(lead):
         lead.lifecycle_status = LifecycleStatusEnum.OPTED_OUT
-        leads_repo.save(lead)
 
-    # Record Audit event
-    audit_repo.create(
+    audit = audit_repo.build(
         AuditEventCreate(
             lead_id=lead.lead_id,
             action="lead_received",
-            actor="system",
+            actor=f"user:{_operator['sub']}",
             details={
-                "customer_name": lead.customer_name,
                 "source": lead.source.value,
                 "lifecycle_status": lead.lifecycle_status.value,
             },
         )
     )
+    lead = leads_repo.create_with_audit(lead, audit, audit_repo)
 
     return lead
 
 
 @router.get("", response_model=List[Lead])
-async def list_leads(
+def list_leads(
+    response: Response,
+    _operator=Depends(require_roles(settings.operator_role, settings.admin_role)),
     lifecycle_status: Optional[LifecycleStatusEnum] = Query(None, description="Filter by lifecycle status"),
     priority: Optional[PriorityEnum] = Query(None, description="Filter by priority"),
     risk_status: Optional[RiskStatusEnum] = Query(None, description="Filter by risk status"),
     source: Optional[SourceEnum] = Query(None, description="Filter by source"),
+    limit: int = Query(50, ge=1, le=100),
+    cursor: Optional[str] = Query(None, max_length=4096),
     leads_repo: LeadsRepository = Depends(get_leads_repo),
     config_repo: ConfigRepository = Depends(get_config_repo),
 ):
@@ -84,26 +102,40 @@ async def list_leads(
     List and filter leads with real-time risk re-evaluation against effective_now().
     """
     business_rules = config_repo.get_config("business_rules").config_value
-    leads = leads_repo.list_leads()
-    
+    try:
+        leads, next_cursor = leads_repo.list_leads_page(
+            limit=limit,
+            cursor=cursor,
+            lifecycle_status=lifecycle_status.value if lifecycle_status else None,
+            priority=priority.value if priority else None,
+            source=source.value if source else None,
+            risk_status=risk_status.value if risk_status else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if next_cursor:
+        response.headers["X-Next-Cursor"] = next_cursor
+
     # Re-evaluate risk dynamically against current effective time
     for lead in leads:
+        if leads_repo.customer_opted_out(lead):
+            lead.lifecycle_status = LifecycleStatusEnum.OPTED_OUT
         new_risk, _ = evaluate_risk(lead, business_rules)
         if new_risk != lead.risk_status:
             lead.risk_status = new_risk
             leads_repo.save(lead)
 
-    return leads_repo.list_leads(
-        lifecycle_status=lifecycle_status.value if lifecycle_status else None,
-        priority=priority.value if priority else None,
-        risk_status=risk_status.value if risk_status else None,
-        source=source.value if source else None,
-    )
+    if risk_status:
+        leads = [lead for lead in leads if lead.risk_status == risk_status]
+    if lifecycle_status:
+        leads = [lead for lead in leads if lead.lifecycle_status == lifecycle_status]
+    return leads
 
 
 @router.get("/{lead_id}", response_model=Lead)
-async def get_lead(
+def get_lead(
     lead_id: str,
+    _operator=Depends(require_roles(settings.operator_role, settings.admin_role)),
     leads_repo: LeadsRepository = Depends(get_leads_repo),
     config_repo: ConfigRepository = Depends(get_config_repo),
 ):
@@ -116,7 +148,8 @@ async def get_lead(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Lead with ID '{lead_id}' not found",
         )
-    
+    if leads_repo.customer_opted_out(lead):
+        lead.lifecycle_status = LifecycleStatusEnum.OPTED_OUT
     # Re-evaluate risk against effective_now()
     business_rules = config_repo.get_config("business_rules").config_value
     new_risk, _ = evaluate_risk(lead, business_rules)
@@ -127,13 +160,14 @@ async def get_lead(
     return lead
 
 
-@router.post("/{lead_id}/analyze", response_model=Lead)
-async def analyze_lead(
+def analyze_lead_core(
     lead_id: str,
-    leads_repo: LeadsRepository = Depends(get_leads_repo),
-    followups_repo: FollowUpsRepository = Depends(get_followups_repo),
-    audit_repo: AuditRepository = Depends(get_audit_repo),
-    config_repo: ConfigRepository = Depends(get_config_repo),
+    _operator,
+    leads_repo: LeadsRepository,
+    followups_repo: FollowUpsRepository,
+    audit_repo: AuditRepository,
+    config_repo: ConfigRepository,
+    analysis_job_id: Optional[str] = None,
 ):
     """
     Invoke Strands Agent for understanding + Deterministic Policy Engine for decisions.
@@ -148,6 +182,11 @@ async def analyze_lead(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Lead with ID '{lead_id}' not found",
         )
+    if analysis_job_id and lead.last_analysis_job_id == analysis_job_id:
+        return lead
+    if leads_repo.customer_opted_out(lead):
+        raise HTTPException(status_code=409, detail="Customer has opted out for this contact")
+    expected_updated_at = lead.updated_at
 
     # Fetch configuration & existing follow-ups
     business_rules = config_repo.get_config("business_rules").config_value
@@ -155,7 +194,13 @@ async def analyze_lead(
 
     # 1. AI Understanding Layer (Strands Agent)
     agent_runner = LeadRescueAgent()
-    analysis_result, execution_events = agent_runner.analyze_lead(lead_id)
+    try:
+        analysis_result, execution_events = agent_runner.analyze_lead(lead_id)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Lead analysis is temporarily unavailable",
+        ) from exc
 
     # Update AI Understanding Fields
     lead.intent = analysis_result.intent
@@ -169,6 +214,8 @@ async def analyze_lead(
     lead.recommended_action = analysis_result.recommended_action
     lead.response_draft = analysis_result.response_draft
     lead.response_status = ResponseStatusEnum.DRAFT
+    if analysis_job_id:
+        lead.last_analysis_job_id = analysis_job_id
 
     # 2. Deterministic Decision Layer (Policy Engine)
     policy_res = PolicyEngine.evaluate(
@@ -191,19 +238,15 @@ async def analyze_lead(
     lead.risk_status = policy_res.risk_status
     lead.at_risk_at = policy_res.at_risk_at
 
-    # Create Follow-up if recommended by policy engine
-    if policy_res.followup_recommendation:
-        followups_repo.create(policy_res.followup_recommendation)
-
-    # Save lead
-    saved_lead = leads_repo.save(lead)
-
-    # Record Audit Trail Event
-    audit_repo.create(
+    followups_to_create = (
+        [FollowUp(**policy_res.followup_recommendation.model_dump())]
+        if policy_res.followup_recommendation else []
+    )
+    audit = audit_repo.build(
         AuditEventCreate(
             lead_id=lead_id,
             action="lead_analyzed",
-            actor="policy_engine",
+            actor=f"user:{_operator['sub']}",
             details={
                 "intent": analysis_result.intent.value,
                 "urgency": analysis_result.urgency.value,
@@ -217,14 +260,108 @@ async def analyze_lead(
         )
     )
 
+    try:
+        saved_lead = leads_repo.save_workflow(
+            lead, followups_to_create, [audit], followups_repo, audit_repo, expected_updated_at
+        )
+    except ConcurrentLeadUpdateError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This lead changed while analysis was running. Refresh it before analyzing again.",
+        ) from exc
+
     return saved_lead
 
 
-async def process_response_action(
+@router.post("/{lead_id}/analyze", response_model=Lead)
+def analyze_lead(
+    lead_id: str,
+    _operator=Depends(require_roles(settings.operator_role, settings.admin_role)),
+    leads_repo: LeadsRepository = Depends(get_leads_repo),
+    followups_repo: FollowUpsRepository = Depends(get_followups_repo),
+    audit_repo: AuditRepository = Depends(get_audit_repo),
+    config_repo: ConfigRepository = Depends(get_config_repo),
+):
+    return analyze_lead_core(lead_id, _operator, leads_repo, followups_repo, audit_repo, config_repo)
+
+
+@router.post("/{lead_id}/analysis-jobs", response_model=AnalysisJobResponse, status_code=status.HTTP_202_ACCEPTED)
+def create_analysis_job(
+    lead_id: str,
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=16, max_length=128),
+    _operator=Depends(require_roles(settings.operator_role, settings.admin_role)),
+    leads_repo: LeadsRepository = Depends(get_leads_repo),
+    followups_repo: FollowUpsRepository = Depends(get_followups_repo),
+    audit_repo: AuditRepository = Depends(get_audit_repo),
+    config_repo: ConfigRepository = Depends(get_config_repo),
+):
+    """Queue durable background analysis and return a pollable job resource."""
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{16,128}", idempotency_key):
+        raise HTTPException(status_code=400, detail="Invalid idempotency key")
+    lead = leads_repo.get_by_id(lead_id)
+    if not lead:
+        raise HTTPException(status_code=404, detail=f"Lead with ID '{lead_id}' not found")
+    if leads_repo.customer_opted_out(lead):
+        raise HTTPException(status_code=409, detail="Customer has opted out for this contact")
+    if not settings.analysis_queue_url:
+        if settings.demo_enabled:
+            lead = analyze_lead(
+                lead_id,
+                _operator,
+                leads_repo,
+                followups_repo,
+                audit_repo,
+                config_repo,
+            )
+            now = lead.updated_at
+            return AnalysisJobResponse(job_id="demo-completed", lead_id=lead_id, status="SUCCEEDED", created_at=now, updated_at=now, result=lead)
+        raise HTTPException(status_code=503, detail="Analysis queue is not configured")
+
+    try:
+        job, created = analysis_jobs_repo.create(lead_id, _operator["sub"], idempotency_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not created and job.get("status") == "FAILED" and job.get("error_code") == "submission_failed":
+        analysis_jobs_repo.set_status(job["job_id"], "QUEUED")
+        job["status"] = "QUEUED"
+    try:
+        if created:
+            audit_repo.create(
+                AuditEventCreate(
+                    lead_id=lead_id,
+                    action="analysis_job_requested",
+                    actor=f"user:{_operator['sub']}",
+                    details={"job_id": job["job_id"]},
+                )
+            )
+        if created or job.get("status") in {"QUEUED", "RETRYING"}:
+            boto3.client("sqs", region_name=settings.aws_region or None).send_message(
+                QueueUrl=settings.analysis_queue_url,
+                MessageBody=json.dumps({"job_id": job["job_id"], "lead_id": lead_id, "actor_id": _operator["sub"]}),
+            )
+    except Exception as exc:
+        analysis_jobs_repo.set_status(job["job_id"], "FAILED", "submission_failed")
+        raise HTTPException(status_code=503, detail="Analysis could not be queued") from exc
+    return AnalysisJobResponse(**job)
+
+
+@router.get("/analysis-jobs/{job_id}", response_model=AnalysisJobResponse)
+def get_analysis_job(
+    job_id: str,
+    _operator=Depends(require_roles(settings.operator_role, settings.admin_role)),
+):
+    job = analysis_jobs_repo.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Analysis job not found")
+    return AnalysisJobResponse(**job)
+
+
+def process_response_action(
     lead_id: str,
     req: ResponseActionRequest,
     leads_repo: LeadsRepository,
     audit_repo: AuditRepository,
+    actor_id: str,
 ) -> Lead:
     """Core logic for human operator response actions (approve, edit, reject)."""
     lead = leads_repo.get_by_id(lead_id)
@@ -233,9 +370,25 @@ async def process_response_action(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Lead with ID '{lead_id}' not found",
         )
+    if req.action not in {"approve", "edit", "reject"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid action '{req.action}'. Supported actions: approve, edit, reject.",
+        )
+    expected_updated_at = lead.updated_at
+
+    def commit_action(*audit_events: AuditEventCreate) -> Lead:
+        built_events = [audit_repo.build(event) for event in audit_events]
+        try:
+            return leads_repo.save_with_audits(lead, built_events, audit_repo, expected_updated_at)
+        except ConcurrentLeadUpdateError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This lead was updated by another operator. Refresh it before trying again.",
+            ) from exc
 
     # Guardrail 1: Opt-Out Check
-    if lead.lifecycle_status == LifecycleStatusEnum.OPTED_OUT:
+    if lead.lifecycle_status == LifecycleStatusEnum.OPTED_OUT or leads_repo.customer_opted_out(lead):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Response not allowed: customer has opted out.",
@@ -249,15 +402,22 @@ async def process_response_action(
         )
 
     draft_text = req.edited_draft or req.response_draft
-    if draft_text:
-        lead.response_draft = draft_text
-
     if req.action == "approve":
-        if not lead.response_draft or not lead.response_draft.strip():
+        candidate_draft = draft_text if draft_text is not None else lead.response_draft
+        if not candidate_draft or not candidate_draft.strip():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No valid response draft available for approval.",
             )
+    elif req.action == "edit" and (not draft_text or not draft_text.strip()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Edited draft text cannot be empty.",
+        )
+    if draft_text:
+        lead.response_draft = draft_text
+
+    if req.action == "approve":
         lead.response_status = ResponseStatusEnum.SIMULATED_SENT
         # Update lifecycle to contacted when operator approves response
         if lead.lifecycle_status in [LifecycleStatusEnum.NEW, LifecycleStatusEnum.ANALYZED, LifecycleStatusEnum.FOLLOW_UP]:
@@ -265,95 +425,78 @@ async def process_response_action(
         # Suppress SLA risk upon response approval
         lead.risk_status = RiskStatusEnum.NORMAL
         
-        saved_lead = leads_repo.save(lead)
-
-        audit_repo.create(
+        return commit_action(
             AuditEventCreate(
                 lead_id=lead_id,
                 action="response_approved",
-                actor="human_operator",
+                actor=f"user:{actor_id}",
                 details={"action": "approve"},
-            )
-        )
-        audit_repo.create(
+            ),
             AuditEventCreate(
                 lead_id=lead_id,
                 action="response_simulated_sent",
-                actor="human_operator",
+                actor=f"user:{actor_id}",
                 details={"simulated": True, "notice": "No external message sent"},
-            )
+            ),
         )
-        return saved_lead
 
     elif req.action == "edit":
-        if not draft_text or not draft_text.strip():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Edited draft text cannot be empty.",
-            )
         lead.response_status = ResponseStatusEnum.DRAFT
-        saved_lead = leads_repo.save(lead)
-
-        audit_repo.create(
+        return commit_action(
             AuditEventCreate(
                 lead_id=lead_id,
                 action="response_edited",
-                actor="human_operator",
+                actor=f"user:{actor_id}",
                 details={"action": "edit"},
             )
         )
-        return saved_lead
 
     elif req.action == "reject":
         lead.response_status = ResponseStatusEnum.REJECTED
-        saved_lead = leads_repo.save(lead)
-
-        audit_repo.create(
+        return commit_action(
             AuditEventCreate(
                 lead_id=lead_id,
                 action="response_rejected",
-                actor="human_operator",
+                actor=f"user:{actor_id}",
                 details={"action": "reject"},
             )
         )
-        return saved_lead
 
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid action '{req.action}'. Supported actions: approve, edit, reject.",
-        )
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid response action")
 
 
 @router.put("/{lead_id}/response", response_model=Lead)
-async def update_lead_response(
+def update_lead_response(
     lead_id: str,
     req: ResponseActionRequest,
+    _operator=Depends(require_roles(settings.operator_role, settings.admin_role)),
     leads_repo: LeadsRepository = Depends(get_leads_repo),
     audit_repo: AuditRepository = Depends(get_audit_repo),
 ):
     """
     Canonical Human Response Workflow Endpoint: Approve & Simulate Send, Edit, or Reject.
     """
-    return await process_response_action(lead_id, req, leads_repo, audit_repo)
+    return process_response_action(lead_id, req, leads_repo, audit_repo, _operator["sub"])
 
 
 @router.post("/{lead_id}/respond", response_model=Lead)
-async def respond_to_lead_alias(
+def respond_to_lead_alias(
     lead_id: str,
     req: ResponseActionRequest,
+    _operator=Depends(require_roles(settings.operator_role, settings.admin_role)),
     leads_repo: LeadsRepository = Depends(get_leads_repo),
     audit_repo: AuditRepository = Depends(get_audit_repo),
 ):
     """
     Backwards-compatible alias for response approval workflow.
     """
-    return await process_response_action(lead_id, req, leads_repo, audit_repo)
+    return process_response_action(lead_id, req, leads_repo, audit_repo, _operator["sub"])
 
 
 @router.post("/{lead_id}/rescue")
-async def rescue_lead(
+def rescue_lead(
     lead_id: str,
+    _operator=Depends(require_roles(settings.operator_role, settings.admin_role)),
     leads_repo: LeadsRepository = Depends(get_leads_repo),
     followups_repo: FollowUpsRepository = Depends(get_followups_repo),
     config_repo: ConfigRepository = Depends(get_config_repo),
@@ -369,6 +512,9 @@ async def rescue_lead(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Lead with ID '{lead_id}' not found",
         )
+    if leads_repo.customer_opted_out(lead):
+        lead.lifecycle_status = LifecycleStatusEnum.OPTED_OUT
+    expected_updated_at = lead.updated_at
 
     # 1. Opt-out guardrail check
     if lead.lifecycle_status == LifecycleStatusEnum.OPTED_OUT:
@@ -376,7 +522,7 @@ async def rescue_lead(
             AuditEventCreate(
                 lead_id=lead_id,
                 action="rescue_blocked",
-                actor="policy_engine",
+                actor=f"user:{_operator['sub']}",
                 details={"reason": "customer_opted_out"},
             )
         )
@@ -388,7 +534,7 @@ async def rescue_lead(
             AuditEventCreate(
                 lead_id=lead_id,
                 action="rescue_blocked",
-                actor="policy_engine",
+                actor=f"user:{_operator['sub']}",
                 details={"reason": "lead_already_resolved"},
             )
         )
@@ -404,7 +550,7 @@ async def rescue_lead(
             AuditEventCreate(
                 lead_id=lead_id,
                 action="rescue_blocked",
-                actor="policy_engine",
+                actor=f"user:{_operator['sub']}",
                 details={"reason": "lead_not_at_risk"},
             )
         )
@@ -419,7 +565,7 @@ async def rescue_lead(
             AuditEventCreate(
                 lead_id=lead_id,
                 action="rescue_blocked",
-                actor="policy_engine",
+                actor=f"user:{_operator['sub']}",
                 details={"reason": "max_active_followups_reached"},
             )
         )
@@ -438,26 +584,24 @@ async def rescue_lead(
     due_at_str = due_dt.isoformat()
 
     # Create Priority Rescue Follow-Up
-    new_followup = followups_repo.create(
-        FollowUpCreate(
+    new_followup = FollowUp(
+        **FollowUpCreate(
             lead_id=lead_id,
             action=f"Priority Rescue Action ({p.upper()})",
             due_at=due_at_str,
             status=FollowUpStatusEnum.SCHEDULED,
             notes="Deterministic rescue triggered due to SLA breach.",
-        )
+        ).model_dump()
     )
 
     # Update lifecycle status to follow_up if not resolved
     if lead.lifecycle_status != LifecycleStatusEnum.RESOLVED:
         lead.lifecycle_status = LifecycleStatusEnum.FOLLOW_UP
-        leads_repo.save(lead)
-
-    audit_repo.create(
+    audit = audit_repo.build(
         AuditEventCreate(
             lead_id=lead_id,
             action="rescue_triggered",
-            actor="policy_engine",
+            actor=f"user:{_operator['sub']}",
             details={
                 "followup_id": new_followup.followup_id,
                 "priority": p.upper(),
@@ -465,6 +609,15 @@ async def rescue_lead(
             },
         )
     )
+    try:
+        leads_repo.save_with_followup_and_audit(
+            lead, new_followup, audit, followups_repo, audit_repo, expected_updated_at
+        )
+    except ConcurrentLeadUpdateError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This lead changed while the rescue was being prepared. Refresh it before retrying.",
+        ) from exc
 
     return {
         "rescued": True,
@@ -476,9 +629,10 @@ async def rescue_lead(
 
 
 @router.put("/{lead_id}/status", response_model=Lead)
-async def update_lead_status(
+def update_lead_status(
     lead_id: str,
     req: UpdateStatusRequest,
+    _operator=Depends(require_roles(settings.operator_role, settings.admin_role)),
     leads_repo: LeadsRepository = Depends(get_leads_repo),
     audit_repo: AuditRepository = Depends(get_audit_repo),
 ):
@@ -491,21 +645,24 @@ async def update_lead_status(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Lead with ID '{lead_id}' not found",
         )
+    expected_updated_at = lead.updated_at
 
     prev_status = lead.lifecycle_status
     target_status = req.lifecycle_status
 
-    if req.reason == "customer_declined":
+    if prev_status == LifecycleStatusEnum.OPTED_OUT and target_status != LifecycleStatusEnum.OPTED_OUT:
+        raise HTTPException(status_code=400, detail="Customer opt-out is a terminal safeguard and cannot be cleared")
+    if req.reason == "customer_declined" and target_status != LifecycleStatusEnum.OPTED_OUT:
         target_status = LifecycleStatusEnum.RESOLVED
+    if leads_repo.customer_opted_out(lead):
+        target_status = LifecycleStatusEnum.OPTED_OUT
 
     lead.lifecycle_status = target_status
-    saved_lead = leads_repo.save(lead)
-
-    audit_repo.create(
+    audit = audit_repo.build(
         AuditEventCreate(
             lead_id=lead_id,
             action="lifecycle_changed",
-            actor="human_operator",
+            actor=f"user:{_operator['sub']}",
             details={
                 "previous_status": prev_status.value,
                 "new_status": target_status.value,
@@ -513,5 +670,10 @@ async def update_lead_status(
             },
         )
     )
-
-    return saved_lead
+    try:
+        return leads_repo.save_with_audits(lead, [audit], audit_repo, expected_updated_at)
+    except ConcurrentLeadUpdateError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This lead was updated by another operator. Refresh it before changing its status.",
+        ) from exc

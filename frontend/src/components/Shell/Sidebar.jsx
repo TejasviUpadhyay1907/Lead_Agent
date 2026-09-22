@@ -1,78 +1,20 @@
 import React from 'react';
-import { LayoutDashboard, Inbox, Clock, Settings, ArrowRight } from 'lucide-react';
+import { LayoutDashboard, Inbox, CalendarClock, Settings2, Activity, ArrowUpRight, ShieldCheck, LifeBuoy, X, ChevronDown } from 'lucide-react';
 
-export function Sidebar({ currentView, setView }) {
-    const navItems = [
-        { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-        { id: 'inbox', label: 'Lead Inbox', icon: Inbox },
-        { id: 'followups', label: 'Follow-ups', icon: Clock },
-        { id: 'settings', label: 'Settings', icon: Settings },
+export function Sidebar({ currentView, setView, leadCount, dueCount, open, onClose, businessName, demoMode = false }) {
+    const items = [
+        ['dashboard', 'Overview', LayoutDashboard], ['inbox', 'Leads', Inbox, leadCount],
+        ['followups', 'Follow-ups', CalendarClock, dueCount], ['activity', 'Activity', Activity], ['settings', 'Settings', Settings2],
     ];
-
-    return (
-        <aside style={{
-            width: '240px',
-            background: 'var(--bg-dark-1)',
-            borderRight: '1px solid var(--border-color)',
-            padding: '1.5rem 1rem',
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'space-between',
-        }}>
-            <nav style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                <div style={{ padding: '0 0.5rem 0.75rem', fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase' }}>
-                    Navigation
-                </div>
-
-                {navItems.map((item) => {
-                    const Icon = item.icon;
-                    const isActive = currentView === item.id;
-                    return (
-                        <button
-                            key={item.id}
-                            onClick={() => setView(item.id)}
-                            style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'space-between',
-                                padding: '0.7rem 0.85rem',
-                                borderRadius: 'var(--radius-sm)',
-                                fontSize: '0.9rem',
-                                fontWeight: isActive ? 600 : 500,
-                                color: isActive ? 'var(--text-main)' : 'var(--text-muted)',
-                                background: isActive ? 'var(--bg-dark-2)' : 'transparent',
-                                borderLeft: isActive ? '3px solid var(--accent-primary)' : '3px solid transparent',
-                                transition: 'all 0.15s ease',
-                            }}
-                        >
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                                <Icon size={18} color={isActive ? 'var(--accent-primary)' : 'currentColor'} />
-                                {item.label}
-                            </div>
-                            {isActive && <ArrowRight size={14} color="var(--accent-primary)" />}
-                        </button>
-                    );
-                })}
-            </nav>
-
-            {/* Architecture Principle Footer Badge */}
-            <div style={{
-                padding: '1rem',
-                borderRadius: 'var(--radius-sm)',
-                background: 'var(--bg-dark-0)',
-                border: '1px solid var(--border-color)',
-                fontSize: '0.75rem',
-                color: 'var(--text-dim)',
-            }}>
-                <div style={{ fontWeight: 600, color: 'var(--text-muted)', marginBottom: '0.25rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-                    ARCHITECTURE BOUNDARY
-                </div>
-                <div style={{ lineHeight: 1.4 }}>
-                    <strong style={{ color: 'var(--accent-primary)' }}>AI</strong> understands.<br />
-                    <strong style={{ color: 'var(--color-success)' }}>Software</strong> decides.<br />
-                    <strong style={{ color: 'var(--color-warm)' }}>Human</strong> approves.
-                </div>
-            </div>
+    return <>
+        {open && <button className="sidebar-backdrop" aria-label="Close navigation" onClick={onClose} />}
+        <aside className={`sidebar ${open ? 'is-open' : ''}`} aria-label="Main navigation">
+            <a href="#/overview" className="brand" onClick={onClose}><span className="brand-symbol"><LifeBuoy size={25} strokeWidth={2} /></span><span>LeadRescue <b>AI</b></span></a>
+            <button className="icon-button sidebar-close" aria-label="Close navigation" onClick={onClose}><X size={18} /></button>
+            <div className="workspace-label"><span className="workspace-monogram">LR</span><div><strong title={businessName || (demoMode ? 'Demo workspace' : 'Company workspace')}>{businessName || (demoMode ? 'Demo workspace' : 'Company workspace')}</strong><small>Lead operations</small></div><ChevronDown size={14} /></div>
+            <p className="nav-caption">WORKSPACE</p>
+            <nav>{items.map(([id, label, Icon, count]) => <button key={id} className={`nav-item ${currentView === id ? 'active' : ''}`} aria-current={currentView === id ? 'page' : undefined} onClick={() => { setView(id); onClose(); }}><Icon size={18} /><span>{label}</span>{count != null && <span className="nav-count">{count}</span>}</button>)}</nav>
+            <div className="sidebar-bottom"><div className="trust-card"><ShieldCheck size={20} /><strong>Intelligence, with guardrails.</strong><p>AI understands.<br />Software decides.<br />Human approves.</p><button onClick={() => { setView('settings'); onClose(); }}>Explore system trust <ArrowUpRight size={14} /></button></div><div className="workspace-footer"><span className="demo-dot" /><span>{demoMode ? 'Demo workspace' : 'Company workspace'}<small>{demoMode ? 'Synthetic data · Simulated sends' : 'Company data · Simulated sends'}</small></span></div></div>
         </aside>
-    );
+    </>;
 }

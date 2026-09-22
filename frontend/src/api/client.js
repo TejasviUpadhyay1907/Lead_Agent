@@ -3,33 +3,41 @@
  * Centralized fetch wrapper interacting with FastAPI backend.
  */
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000/api';
+import { getAccessToken } from '../auth/oidc';
+export const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
 
-async function request(endpoint, options = {}) {
+async function request(endpoint, options = {}, withMetadata = false) {
     const url = `${API_BASE_URL}${endpoint}`;
-    const config = {
-        headers: {
-            'Content-Type': 'application/json',
-            ...options.headers,
-        },
-        ...options,
-    };
-
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), endpoint.endsWith('/analyze') ? 90000 : 20000);
     try {
-        const response = await fetch(url, config);
+        const token = getAccessToken();
+        const response = await fetch(url, {
+            ...options,
+            signal: controller.signal,
+            headers: { ...options.headers, ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(options.body ? { 'Content-Type': 'application/json' } : {}) },
+        });
         if (!response.ok) {
-            const errorData = await response.json().catch(() => ({ detail: 'HTTP Request Failed' }));
-            throw new Error(errorData.detail || `Error ${response.status}: ${response.statusText}`);
+            if (response.status === 401) window.dispatchEvent(new Event('leadrescue-auth-expired'));
+            const error = new Error(`Request failed (${response.status})`);
+            error.status = response.status;
+            throw error;
         }
-        return await response.json();
-    } catch (err) {
-        console.error(`API Error [${endpoint}]:`, err);
-        throw err;
+        if (response.status === 204) return null;
+        const body = await response.json();
+        return withMetadata ? { items: body, nextCursor: response.headers.get('X-Next-Cursor') || null } : body;
+    } finally {
+        clearTimeout(timeout);
     }
 }
 
 export const api = {
     // Leads
+    getLeadsPage: (params = {}) => {
+        const query = new URLSearchParams({ limit: '50' });
+        if (params.cursor) query.set('cursor', params.cursor);
+        return request(`/leads?${query}`, {}, true);
+    },
     getLeads: (params = {}) => {
         const query = new URLSearchParams();
         if (params.lifecycle_status) query.append('lifecycle_status', params.lifecycle_status);
@@ -42,14 +50,87 @@ export const api = {
 
     getLead: (id) => request(`/leads/${id}`),
 
+    exportLeadData: async (id) => {
+        const token = getAccessToken();
+        const response = await fetch(`${API_BASE_URL}/privacy/leads/${encodeURIComponent(id)}/export`, {
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+            cache: 'no-store',
+        });
+        if (!response.ok) {
+            if (response.status === 401) window.dispatchEvent(new Event('leadrescue-auth-expired'));
+            const error = new Error(`Request failed (${response.status})`);
+            error.status = response.status;
+            throw error;
+        }
+        const blob = await response.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        const download = document.createElement('a');
+        download.href = objectUrl;
+        download.download = `lead-${id.slice(0, 80).replace(/[^A-Za-z0-9_-]/g, '_')}-export.json`;
+        document.body.appendChild(download);
+        download.click();
+        download.remove();
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    },
+
     createLead: (leadData) => request('/leads', {
         method: 'POST',
         body: JSON.stringify(leadData),
     }),
 
-    analyzeLead: (id) => request(`/leads/${id}/analyze`, {
-        method: 'POST',
-    }),
+    analyzeLead: async (id) => {
+        const storageKey = `leadrescue.analysis-job.${id}`;
+        const requestKeyStorage = `${storageKey}.request`;
+        let requestKey = sessionStorage.getItem(requestKeyStorage);
+        if (!requestKey) {
+            requestKey = crypto.randomUUID();
+            sessionStorage.setItem(requestKeyStorage, requestKey);
+        }
+        let jobId = sessionStorage.getItem(storageKey);
+        let job;
+        if (jobId) {
+            try {
+                job = await request(`/leads/analysis-jobs/${encodeURIComponent(jobId)}`);
+            } catch (error) {
+                if (error.status !== 404) throw error;
+                sessionStorage.removeItem(storageKey);
+                jobId = null;
+            }
+        }
+        if (!jobId) {
+            job = await request(`/leads/${encodeURIComponent(id)}/analysis-jobs`, {
+                method: 'POST',
+                headers: { 'Idempotency-Key': requestKey },
+            });
+            if (job.result) {
+                sessionStorage.removeItem(requestKeyStorage);
+                return job.result;
+            }
+            jobId = job.job_id;
+            sessionStorage.setItem(storageKey, jobId);
+        }
+        const deadline = Date.now() + 10 * 60 * 1000;
+        while (Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            const current = await request(`/leads/analysis-jobs/${encodeURIComponent(jobId)}`);
+            if (current.status === 'SUCCEEDED') {
+                const lead = await request(`/leads/${encodeURIComponent(id)}`);
+                sessionStorage.removeItem(storageKey);
+                sessionStorage.removeItem(requestKeyStorage);
+                return lead;
+            }
+            if (current.status === 'FAILED') {
+                sessionStorage.removeItem(storageKey);
+                sessionStorage.removeItem(requestKeyStorage);
+                const error = new Error('Lead analysis could not be completed. You can safely retry.');
+                error.status = 503;
+                throw error;
+            }
+        }
+        const error = new Error('Analysis is still queued. Refresh the lead before trying again.');
+        error.status = 504;
+        throw error;
+    },
 
     respondToLead: (id, action, editedDraft) => request(`/leads/${id}/response`, {
         method: 'PUT',
@@ -66,6 +147,11 @@ export const api = {
     }),
 
     // Follow-ups
+    getFollowupsPage: (params = {}) => {
+        const query = new URLSearchParams({ limit: '50' });
+        if (params.cursor) query.set('cursor', params.cursor);
+        return request(`/followups?${query}`, {}, true);
+    },
     getFollowups: (params = {}) => {
         const query = new URLSearchParams();
         if (params.lead_id) query.append('lead_id', params.lead_id);
@@ -80,7 +166,11 @@ export const api = {
     }),
 
     // Audit
-    getAudit: (id) => request(`/leads/${id}/audit`),
+    getAudit: (id, cursor) => {
+        const query = new URLSearchParams({ limit: '50' });
+        if (cursor) query.set('cursor', cursor);
+        return request(`/leads/${id}/audit?${query}`, {}, true);
+    },
 
     // Config
     getConfig: () => request('/config'),
@@ -91,6 +181,7 @@ export const api = {
     }),
 
     // Demo Controls
+    getServerTime: () => request('/server-time'),
     getDemoClock: () => request('/demo/clock'),
 
     advanceDemoTime: (minutes = 20) => request('/demo/advance-time', {

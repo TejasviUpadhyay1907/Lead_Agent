@@ -1,0 +1,59 @@
+name: Quality gates
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend production build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+
+  backend-and-infrastructure:
+    name: Backend and SAM validation
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: 0.11.26
+      - uses: aws-actions/setup-sam@v2
+      - name: Verify Python lock is current
+        run: >-
+          uv pip compile requirements.in --python-version 3.12
+          --python-platform x86_64-unknown-linux-gnu --generate-hashes
+          --output-file requirements.txt --no-cache --no-python-downloads
+      - name: Reject a stale Python lock
+        run: git diff --exit-code -- backend/requirements.txt
+        working-directory: .
+      - name: Check backend Python syntax
+        run: python -m compileall -q app scripts
+      - name: Validate SAM template
+        working-directory: .
+        run: sam validate --template-file template.yaml --lint

@@ -1,65 +1,19 @@
 import React from 'react';
-import { AlertTriangle, CheckCircle, Flame, Snowflake, Sun } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Flame, Snowflake, Sun, ShieldOff } from 'lucide-react';
+import { humanize } from '../../api/presentation';
 
 export function PriorityBadge({ priority }) {
-    if (!priority) return null;
-    const p = priority.toLowerCase();
-
-    if (p === 'hot') {
-        return (
-            <span className="badge badge-hot">
-                <Flame size={12} /> HOT
-            </span>
-        );
-    }
-    if (p === 'warm') {
-        return (
-            <span className="badge badge-warm">
-                <Sun size={12} /> WARM
-            </span>
-        );
-    }
-    return (
-        <span className="badge badge-cold">
-            <Snowflake size={12} /> COLD
-        </span>
-    );
+    const key = priority?.toLowerCase();
+    const icons = { hot: Flame, warm: Sun, cold: Snowflake };
+    const Icon = icons[key];
+    return <span className={`badge ${Icon ? `badge-${key}` : 'badge-normal'}`}>{Icon && <Icon size={12} />}{priority ? priority.toUpperCase() : 'Unscored'}</span>;
 }
-
 export function RiskBadge({ risk }) {
-    if (!risk) return null;
-    const r = risk.toLowerCase();
-
-    if (r === 'at_risk') {
-        return (
-            <span className="badge badge-at-risk">
-                <AlertTriangle size={12} /> AT RISK
-            </span>
-        );
-    }
-    return (
-        <span className="badge badge-normal">
-            <CheckCircle size={12} /> NORMAL
-        </span>
-    );
+    const key = risk?.toLowerCase();
+    const atRisk = ['at_risk', 'overdue'].includes(key);
+    const Icon = atRisk ? AlertTriangle : key === 'normal' ? CheckCircle2 : null;
+    return <span className={`badge ${atRisk ? 'badge-at-risk' : 'badge-normal'}`}>{Icon && <Icon size={12} />}{humanize(risk)}</span>;
 }
-
 export function LifecycleBadge({ status }) {
-    if (!status) return null;
-    const s = status.toLowerCase();
-
-    const labels = {
-        new: 'NEW',
-        analyzed: 'ANALYZED',
-        contacted: 'CONTACTED',
-        follow_up: 'FOLLOW-UP',
-        resolved: 'RESOLVED',
-        opted_out: 'OPTED OUT',
-    };
-
-    return (
-        <span className="badge-sub">
-            {labels[s] || s.toUpperCase()}
-        </span>
-    );
+    return <span className={`badge-sub ${status === 'opted_out' ? 'opt-out-label' : ''}`}>{status === 'opted_out' && <ShieldOff size={12} />}{humanize(status)}</span>;
 }
