@@ -5,7 +5,7 @@
 **Product:** LeadRescue AI  
 **Audience:** A new engineering/product chat continuing the industrial-readiness goal
 
-> **Current-state note:** This handoff preserves an earlier audit snapshot and its repository/test details are historical. Use [CURRENT_AUDIT_2026-09-23.md](CURRENT_AUDIT_2026-09-23.md) as the source of truth for current commits, worktree, synthetic agent benchmark, opt-out guardrails, latest local test result, and remaining release gates. The 2026-09-24 current audit records published `main` at `3008e3344588c9857c1b1dbbed6001b674538516`, a clean worktree, local build/SAM validation, and 158 passing backend tests. No customer-like staging deployment has been proven; refresh live GitHub state before further edits.
+> **Current-state note (verified 2026-09-24):** The detailed sections below preserve an earlier audit snapshot; do not use their embedded Git state as current. The authoritative current snapshot is [CURRENT_AUDIT_2026-09-23.md](CURRENT_AUDIT_2026-09-23.md) and [MARKET_READINESS.md](MARKET_READINESS.md). Current `main`, `origin/main`, and GitHub `main` are at `ba9c949c2c508c06fdfece904562dd09085ea324`, the worktree is clean, the local backend suite has 160 passing tests, and GitHub Actions run [35921915821](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35921915821) passed both frontend build and backend/SAM validation. The product remains pre-staging and not generally sellable; no customer-like AWS deployment or live CRM/messaging flow has been proven.
 
 ## Executive assessment
 
