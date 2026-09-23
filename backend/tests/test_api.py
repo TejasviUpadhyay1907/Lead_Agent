@@ -59,6 +59,35 @@ def test_opt_out_lead_creation():
     assert data["lifecycle_status"] == "opted_out"
 
 
+def test_common_opt_out_variants_are_enforced_at_lead_intake():
+    for index, message in enumerate((
+        "Please don’t message me again.",
+        "Do not contact us.",
+        "No more emails, please.",
+        "Please opt me out of promotions.",
+    )):
+        response = client.post("/api/leads", json={
+            "customer_name": f"Opt-out Contact {index}",
+            "customer_email": f"opt-out-intake-{index}@example.com",
+            "source": "website",
+            "raw_message": message,
+        })
+        assert response.status_code == 201
+        assert response.json()["lifecycle_status"] == "opted_out"
+
+
+def test_question_about_opt_out_policy_does_not_suppress_contact():
+    response = client.post("/api/leads", json={
+        "customer_name": "Policy Question Contact",
+        "customer_email": "policy-question@example.com",
+        "source": "website",
+        "raw_message": "Can you explain your opt-out policy?",
+    })
+
+    assert response.status_code == 201
+    assert response.json()["lifecycle_status"] == "new"
+
+
 def test_list_leads_and_filtering():
     res = client.get("/api/leads?source=whatsapp")
     assert res.status_code == 200

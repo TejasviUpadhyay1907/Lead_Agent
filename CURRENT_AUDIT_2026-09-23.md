@@ -65,6 +65,12 @@ The commercial promise should ultimately be measured as faster first response, f
 
 ## Audit evidence and current checkout state
 
+### Continuation update — 2026-09-24
+
+- Identified the original opt-out detector's narrow literal phrase list as a customer-safety gap. Expanded deterministic English phrase normalization and coverage for common stop-contact, unsubscribe, remove/delete, and future-message requests. Matching uses punctuation/case/Unicode-apostrophe normalization and includes negative/informational regression examples to reduce false suppressions.
+- The same `check_opt_out` policy is applied at manual lead creation, inbound signed webhook intake, policy analysis, and subsequent durable suppression handling. New tests validate direct guardrail behavior and API intake lifecycle outcomes. This does not replace provider-authoritative consent events or multilingual review.
+- Full backend suite currently passes **138 tests with 1 upstream deprecation warning** on Python 3.11 after the opt-out work. This source change is not yet in the published audit baseline; verify Git state and CI after commit.
+
 - Snapshot below records the state at publication of the first benchmark, followed by the 2026-09-24 continuation and publication evidence.
 - At the start of the 2026-09-24 continuation, local `main` was `4ff4df5d87d96ed0e5a6edd5a40902c7b884a9cb` (`docs: sync audit with published benchmark`). This commit had previously been verified on GitHub `main`, and its CI run [35889942567](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35889942567) passed.
 - The 2026-09-24 continuation added two exact-response prompt-injection canaries, narrow response-policy language, regression tests, and updated benchmark notes. Commit `0960d9066c4ac774821472b16b5f2ae87760f3c1` is pushed and verified as live GitHub `main`; Actions run [35910999823](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35910999823) passed both frontend and backend/SAM jobs. The worktree was clean immediately after push.
