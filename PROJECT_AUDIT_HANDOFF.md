@@ -58,7 +58,7 @@ The product principle is **â€œAI understands. Software decides. Humans approve.â
 - Transactional state changes for important lead/follow-up/config/audit workflows and conditional writes to reject stale concurrent edits.
 - Signed inbound webhook uses timestamped HMAC, a Secrets Manager secret, replay checks, payload-bound idempotency for new events, and transactionally records lead/audit/deduplication state.
 - Durable contact-wide email/phone opt-out suppression, transactional safeguards, fail-closed behavior, HMAC-derived lookup keys from a dedicated Secrets Manager secret, key-fingerprint-bound history and suppression migration markers/readiness gates, and dry-run-first backfill scripts.
-- A helper that creates the HMAC key through Secrets Manager and prints only its ARN; key rotation requires a pause and both backfills.
+- A helper creates the HMAC key through Secrets Manager and does not print the secret value or ARN; retrieve the ARN through Secrets Manager for deployment configuration. Key rotation requires a pause and both backfills.
 - Tenant-scoped paginated lead/follow-up/audit access, per-lead admin export, no-store export response, and reduced PII in new audit events.
 - Point-in-time recovery configured for core tables; log retention and CloudWatch alarms defined in SAM.
 

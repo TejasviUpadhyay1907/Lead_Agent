@@ -48,8 +48,9 @@ def main() -> int:
         region_name=args.region,
         config=Config(connect_timeout=3, read_timeout=5, retries={"total_max_attempts": 2}),
     )
-    arn = create_customer_index_secret(client, args.name, args.kms_key_id)
-    print(f"Customer index secret created: {arn}")
+    create_customer_index_secret(client, args.name, args.kms_key_id)
+    print("Customer index secret created successfully in Secrets Manager.")
+    print("Retrieve its ARN from Secrets Manager when configuring the deployment.")
     print("Secret value was not printed or written to a local file.")
     return 0
 
