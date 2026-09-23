@@ -1,0 +1,62 @@
+{
+  "dataset_version": "2026-09-23.1",
+  "description": "Synthetic English-language lead-analysis cases. No customer records or personal contact data.",
+  "cases": [
+    {
+      "case_id": "urgent_cnc_quote_pune",
+      "message": "We need to buy 10 CNC machines delivered to Pune as soon as possible. Please send a quote.",
+      "source": "website",
+      "prior_interactions": 0,
+      "expected": {"intent": "purchase", "urgency": "high", "customer_stage": "new", "product": "CNC machines", "quantity": 10, "location": "Pune"}
+    },
+    {
+      "case_id": "solar_catalog_request",
+      "message": "Could you please send your catalog for solar panels? I am gathering product information.",
+      "source": "email",
+      "prior_interactions": 0,
+      "expected": {"intent": "inquiry", "urgency": "low", "customer_stage": "new", "product": "Solar Panels", "quantity": null, "location": null}
+    },
+    {
+      "case_id": "urgent_machine_support",
+      "message": "Urgent support needed: our packaging machine has stopped working and production is blocked.",
+      "source": "whatsapp",
+      "prior_interactions": 0,
+      "expected": {"intent": "support", "urgency": "high", "customer_stage": "new", "product": "Packaging Machines", "quantity": null, "location": null}
+    },
+    {
+      "case_id": "returning_cnc_reorder",
+      "message": "We would like to reorder 5 CNC machines for our Mumbai facility this week.",
+      "source": "marketplace",
+      "prior_interactions": 1,
+      "expected": {"intent": "purchase", "urgency": "medium", "customer_stage": "returning", "product": "CNC machines", "quantity": 5, "location": "Mumbai"}
+    },
+    {
+      "case_id": "solar_specification_question",
+      "message": "I am comparing solar panels. Can you share their technical specifications?",
+      "source": "website",
+      "prior_interactions": 0,
+      "expected": {"intent": "inquiry", "urgency": "low", "customer_stage": "new", "product": "Solar Panels", "quantity": null, "location": null}
+    },
+    {
+      "case_id": "packaging_quote_mumbai",
+      "message": "Please quote 5 packaging machines for delivery to Mumbai.",
+      "source": "phone",
+      "prior_interactions": 0,
+      "expected": {"intent": "purchase", "urgency": "low", "customer_stage": "new", "product": "Packaging Machines", "quantity": 5, "location": "Mumbai"}
+    },
+    {
+      "case_id": "cnc_warranty_question",
+      "message": "How does the warranty for your CNC machines work? I only need the policy details right now.",
+      "source": "email",
+      "prior_interactions": 0,
+      "expected": {"intent": "inquiry", "urgency": "low", "customer_stage": "new", "product": "CNC machines", "quantity": null, "location": null}
+    },
+    {
+      "case_id": "no_product_details_yet",
+      "message": "We are planning a factory upgrade and would like to discuss options and pricing. Please contact us this week.",
+      "source": "website",
+      "prior_interactions": 0,
+      "expected": {"intent": "purchase", "urgency": "medium", "customer_stage": "new", "product": null, "quantity": null, "location": null}
+    }
+  ]
+}

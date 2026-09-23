@@ -5,6 +5,8 @@
 **Product:** LeadRescue AI  
 **Audience:** A new engineering/product chat continuing the industrial-readiness goal
 
+> **Current-state note:** This handoff preserves an earlier audit snapshot and its repository/test details are historical. Use [CURRENT_AUDIT_2026-09-23.md](CURRENT_AUDIT_2026-09-23.md) as the source of truth for the current commit, worktree, synthetic agent benchmark, latest local test result, and remaining release gates. Refresh the live GitHub ref before publication because remote access was unavailable during that audit.
+
 ## Executive assessment
 
 LeadRescue is a credible, security-conscious prototype for helping small and medium businesses triage and rescue sales leads. Its strongest architectural decision is the boundary: AI interprets and drafts; deterministic code applies scoring, lifecycle, consent, and workflow rules; a human approves customer-facing action. The repository contains a real full-stack application, a substantial backend policy/workflow layer, AWS infrastructure-as-code, tests, migration scripts, and deployment/integration documentation.
