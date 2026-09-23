@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ArrowLeft, ArrowUpRight, Download, Mail, Phone, MessageSquare, History, LockKeyhole, LifeBuoy, BrainCircuit, UserRound, CheckCircle2 } from 'lucide-react';
 import { api } from '../api/client';
-import { dateTime, humanize, isBlocked, isOptedOut, safeError } from '../api/presentation';
+import { dateTime, humanize, isBlocked, isOptedOut, isConfirmedSent, lifecyclePresentationStatus, safeError } from '../api/presentation';
 import { LifecycleBadge } from '../components/Common/Badge';
 import { SectionHeader, WorkflowStrip, Skeleton, ErrorState, Avatar, Notice, Modal, BusyLabel } from '../components/Common/UI';
 import { AIAnalysisPanel, PolicyDecisionPanel, ResponseComposer } from '../components/Common/LeadPanels';
@@ -34,7 +34,7 @@ export function LeadDetailView({ leadId, onBack, onRefreshLeads, revision, confi
             if (version !== loadVersion.current) return;
             if (record.status === 'fulfilled' && record.value?.lead_id) {
                 setLead(record.value);
-                if (!dirtyRef.current || isBlocked(record.value) || record.value.response_status === 'simulated_sent') {
+                if (!dirtyRef.current || isBlocked(record.value) || isConfirmedSent(record.value)) {
                     setText(record.value.response_draft || '');
                     dirtyRef.current = false;
                     setReviewed(false);
@@ -57,7 +57,7 @@ export function LeadDetailView({ leadId, onBack, onRefreshLeads, revision, confi
             else result = await api.respondToLead(leadId, action, action === 'reject' ? undefined : text);
             dirtyRef.current = false; setEditing(false); setReviewed(false); setModal(null);
             if (result?.lead_id) { setLead(result); setText(result.response_draft || ''); }
-            setNotice({ tone: action === 'rescue' && !result.rescued ? 'info' : 'success', text: action === 'rescue' ? result.rescued ? `Priority follow-up scheduled${result.due_at ? ` for ${dateTime(result.due_at)}` : ''}. Human review is still required; nothing was sent.` : `Rescue was not scheduled.${result.reason ? ` ${result.reason}` : ' The policy engine did not permit this action.'}` : action === 'analyze' ? 'Analysis returned. Review the extracted context and policy decision below.' : action === 'approve' ? 'Approval accepted. The refreshed record below shows the simulated send result.' : action === 'edit' ? 'Your edited draft was saved. Review it before approving.' : 'Response rejected. No message was sent.' });
+            setNotice({ tone: action === 'rescue' && !result.rescued ? 'info' : 'success', text: action === 'rescue' ? result.rescued ? `Priority follow-up scheduled${result.due_at ? ` for ${dateTime(result.due_at)}` : ''}. Human review is still required; nothing was sent.` : `Rescue was not scheduled.${result.reason ? ` ${result.reason}` : ' The policy engine did not permit this action.'}` : action === 'analyze' ? 'Analysis returned. Review the extracted context and policy decision below.' : action === 'approve' ? 'Approval recorded. No message was sent; delivery is not configured.' : action === 'edit' ? 'Your edited draft was saved. Review it before approving.' : 'Response rejected. No message was sent.' });
             await onRefreshLeads();
             setRetry(value => value + 1);
         } catch (actionError) { setModal(null); setNotice({ tone: 'error', text: safeError(actionError, 'This action could not be confirmed. Refresh the lead and audit before retrying to avoid a duplicate action.') }); }
@@ -95,7 +95,7 @@ export function LeadDetailView({ leadId, onBack, onRefreshLeads, revision, confi
     const dirty = text !== (lead.response_draft || '');
     return <div className="view-stack lead-detail">
         <div className="detail-navigation"><button className="back-link" onClick={onBack}><ArrowLeft size={16} /> All leads</button><span className="lead-reference">RECORD / {lead.lead_id.slice(0, 8)}</span></div>
-        <div className="customer-header"><div className="customer-identity"><Avatar name={lead.customer_name} large /><div><div className="customer-title"><h1>{lead.customer_name || 'Unnamed lead'}</h1><LifecycleBadge status={lead.lifecycle_status} /></div><p><MessageSquare size={14} /> {humanize(lead.source)} <span className="meta-dot">·</span> Received {dateTime(lead.created_at)}</p></div></div><div className="header-actions"><button className="btn-secondary" disabled={exportBusy} onClick={exportRecord}>{exportBusy ? <BusyLabel>Preparing export…</BusyLabel> : <><Download size={15} /> Export record <span className="badge-sub">Admin</span></>}</button>{!lead.intent && !isBlocked(lead) && <button className="btn-ai" disabled={!!busy} onClick={() => perform('analyze')}>{busy === 'analyze' ? <BusyLabel>Analyzing context…</BusyLabel> : <><BrainCircuit size={16} /> Analyze lead</>}</button>}<a className="btn-secondary" href="#response-workspace" onClick={event => { event.preventDefault(); document.getElementById('response-workspace')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}>Response workspace <ArrowUpRight size={15} /></a></div></div>
+        <div className="customer-header"><div className="customer-identity"><Avatar name={lead.customer_name} large /><div><div className="customer-title"><h1>{lead.customer_name || 'Unnamed lead'}</h1><LifecycleBadge status={lifecyclePresentationStatus(lead)} /></div><p><MessageSquare size={14} /> {humanize(lead.source)} <span className="meta-dot">·</span> Received {dateTime(lead.created_at)}</p></div></div><div className="header-actions"><button className="btn-secondary" disabled={exportBusy} onClick={exportRecord}>{exportBusy ? <BusyLabel>Preparing export…</BusyLabel> : <><Download size={15} /> Export record <span className="badge-sub">Admin</span></>}</button>{!lead.intent && !isBlocked(lead) && <button className="btn-ai" disabled={!!busy} onClick={() => perform('analyze')}>{busy === 'analyze' ? <BusyLabel>Analyzing context…</BusyLabel> : <><BrainCircuit size={16} /> Analyze lead</>}</button>}<a className="btn-secondary" href="#response-workspace" onClick={event => { event.preventDefault(); document.getElementById('response-workspace')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}>Response workspace <ArrowUpRight size={15} /></a></div></div>
         {optedOut && <div className="safety-banner" role="status"><LockKeyhole size={26} /><div><span className="eyebrow">OPT-OUT SAFEGUARD TRIGGERED</span><h2>This customer's choice is protected.</h2><p>Customer requested opt-out. Sending, rescue and follow-up outreach are blocked. There is no override.</p></div><span className="badge-sub opt-out-label">Outreach blocked</span></div>}
         {notice && <Notice tone={notice.tone}>{notice.text}</Notice>}
         <WorkflowStrip compact />

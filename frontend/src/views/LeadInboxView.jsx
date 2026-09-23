@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Search, Plus, ChevronRight, ChevronLeft, Eye, Inbox } from 'lucide-react';
 import { PriorityBadge, RiskBadge, LifecycleBadge } from '../components/Common/Badge';
 import { PageHeader, EmptyState, Notice, BusyLabel, Avatar, Modal } from '../components/Common/UI';
-import { humanize, isPendingResponse, isOptedOut, relativeDue, timeOnly, safeError } from '../api/presentation';
+import { humanize, isPendingResponse, isOptedOut, lifecyclePresentationStatus, relativeDue, timeOnly, safeError } from '../api/presentation';
 
 /** Channel values accepted by the create endpoint (existing API contract). */
 const CHANNELS = [
@@ -67,7 +67,7 @@ function StatusCell({ lead }) {
     return (
         <div className="cell-status">
             <RiskBadge risk={lead.risk_status} />
-            <LifecycleBadge status={lead.lifecycle_status} />
+            <LifecycleBadge status={lifecyclePresentationStatus(lead)} />
         </div>
     );
 }
@@ -100,7 +100,7 @@ export function LeadInboxView({ leads = [], followups, onSelectLead, onCreateLea
 
     const priorityOptions = useMemo(() => uniqueValues(leads.map(lead => lead.priority)), [leads]);
     const sourceOptions = useMemo(() => uniqueValues(leads.map(lead => lead.source)), [leads]);
-    const lifecycleOptions = useMemo(() => uniqueValues(leads.map(lead => lead.lifecycle_status)), [leads]);
+    const lifecycleOptions = useMemo(() => uniqueValues(leads.map(lifecyclePresentationStatus)), [leads]);
 
     const tabCounts = useMemo(() => ({
         all: leads.length,
@@ -129,7 +129,7 @@ export function LeadInboxView({ leads = [], followups, onSelectLead, onCreateLea
         if (tab === 'opted_out' && !isOptedOut(lead)) return false;
         if (priorityFilter !== 'all' && normalize(lead.priority) !== priorityFilter) return false;
         if (sourceFilter !== 'all' && normalize(lead.source) !== sourceFilter) return false;
-        if (lifecycleFilter !== 'all' && normalize(lead.lifecycle_status) !== lifecycleFilter) return false;
+        if (lifecycleFilter !== 'all' && normalize(lifecyclePresentationStatus(lead)) !== lifecycleFilter) return false;
         if (query) {
             const haystack = [
                 lead.customer_name,

@@ -15,7 +15,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from boto3.dynamodb.types import TypeSerializer
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, EmailStr, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationError, field_validator
 from starlette.concurrency import run_in_threadpool
 
 from app.config.settings import settings
@@ -24,7 +24,13 @@ from app.models.enums import LifecycleStatusEnum, SourceEnum
 from app.models.lead import Lead
 from app.repositories.base import get_boto3_dynamodb_resource
 from app.repositories.customer_index import customer_index_keys
-from app.repositories.customer_suppressions import migration_marker_key, suppression_items, suppression_keys
+from app.repositories.customer_suppressions import (
+    history_index_marker_key,
+    migration_marker_key,
+    suppression_items,
+    suppression_keys,
+)
+from app.repositories.customer_index import require_customer_index_key
 from app.policy.guardrails import check_opt_out
 
 logger = logging.getLogger(__name__)
@@ -43,6 +49,13 @@ class InboundLead(BaseModel):
     customer_phone: Optional[str] = Field(default=None, max_length=64)
     source: SourceEnum
     message: str = Field(min_length=1, max_length=20000)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("customer_name", "message", mode="before")
+    @classmethod
+    def trim_required_text(cls, value):
+        return value.strip() if isinstance(value, str) else value
 
 
 def _get_webhook_secret() -> str:
@@ -150,10 +163,23 @@ def _create_or_return_duplicate(
         raise HTTPException(status_code=503, detail="Lead storage is unavailable")
     events_table = dynamodb.Table(settings.processed_events_table)
     suppressions_table = dynamodb.Table(settings.customer_suppressions_table)
-    if not suppressions_table.get_item(
+    migration_marker = suppressions_table.get_item(
         Key={"suppression_key": migration_marker_key(settings.effective_tenant_id)},
         ConsistentRead=True,
-    ).get("Item"):
+    ).get("Item")
+    history_marker = suppressions_table.get_item(
+        Key={"suppression_key": history_index_marker_key(settings.effective_tenant_id)},
+        ConsistentRead=True,
+    ).get("Item")
+    active_index_key_id = require_customer_index_key()
+    if (
+        not migration_marker
+        or migration_marker.get("index_key_scheme") != "hmac-sha256-v1"
+        or migration_marker.get("index_key_id") != active_index_key_id
+        or not history_marker
+        or history_marker.get("index_key_scheme") != "hmac-sha256-v1"
+        or history_marker.get("index_key_id") != active_index_key_id
+    ):
         raise HTTPException(status_code=503, detail="Customer opt-out data is being migrated")
     if lead.lifecycle_status != LifecycleStatusEnum.OPTED_OUT:
         for key in suppression_keys(settings.effective_tenant_id, lead.customer_email, lead.customer_phone):

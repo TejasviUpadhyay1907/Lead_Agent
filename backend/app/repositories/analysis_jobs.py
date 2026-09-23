@@ -19,7 +19,11 @@ class AnalysisJobsRepository:
     def __init__(self):
         self._memory: dict[str, dict] = {}
         resource = get_boto3_dynamodb_resource()
-        self._table = resource.Table(settings.analysis_jobs_table) if resource and settings.analysis_jobs_table else None
+        self._table = (
+            resource.Table(settings.analysis_jobs_table)
+            if resource and settings.analysis_jobs_table and not settings.demo_enabled
+            else None
+        )
         if self._table is None and not settings.demo_enabled:
             raise RuntimeError("Durable analysis job storage is required")
 

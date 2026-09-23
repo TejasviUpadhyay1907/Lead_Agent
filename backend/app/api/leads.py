@@ -116,14 +116,19 @@ def list_leads(
     if next_cursor:
         response.headers["X-Next-Cursor"] = next_cursor
 
+    # Copy memory repository results before applying response-only projections.
+    leads = [lead.model_copy(deep=True) for lead in leads]
+
+    # Batch suppression lookups to avoid two strongly consistent reads per lead.
+    opted_out_lead_ids = leads_repo.customer_opted_out_many(leads)
+
     # Re-evaluate risk dynamically against current effective time
     for lead in leads:
-        if leads_repo.customer_opted_out(lead):
+        if lead.lead_id in opted_out_lead_ids:
             lead.lifecycle_status = LifecycleStatusEnum.OPTED_OUT
         new_risk, _ = evaluate_risk(lead, business_rules)
         if new_risk != lead.risk_status:
             lead.risk_status = new_risk
-            leads_repo.save(lead)
 
     if risk_status:
         leads = [lead for lead in leads if lead.risk_status == risk_status]
@@ -148,6 +153,8 @@ def get_lead(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Lead with ID '{lead_id}' not found",
         )
+    # Memory repository results are shared references; keep GET projections read-only.
+    lead = lead.model_copy(deep=True)
     if leads_repo.customer_opted_out(lead):
         lead.lifecycle_status = LifecycleStatusEnum.OPTED_OUT
     # Re-evaluate risk against effective_now()
@@ -155,7 +162,6 @@ def get_lead(
     new_risk, _ = evaluate_risk(lead, business_rules)
     if new_risk != lead.risk_status:
         lead.risk_status = new_risk
-        lead = leads_repo.save(lead)
 
     return lead
 
@@ -361,6 +367,7 @@ def process_response_action(
     req: ResponseActionRequest,
     leads_repo: LeadsRepository,
     audit_repo: AuditRepository,
+    config_repo: ConfigRepository,
     actor_id: str,
 ) -> Lead:
     """Core logic for human operator response actions (approve, edit, reject)."""
@@ -401,6 +408,12 @@ def process_response_action(
             detail="Response not allowed: lead is already resolved.",
         )
 
+    if lead.response_status == ResponseStatusEnum.SENT and req.action != "approve":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A provider-confirmed sent response cannot be edited or rejected.",
+        )
+
     draft_text = req.edited_draft or req.response_draft
     if req.action == "approve":
         candidate_draft = draft_text if draft_text is not None else lead.response_draft
@@ -409,6 +422,20 @@ def process_response_action(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No valid response draft available for approval.",
             )
+        if lead.response_status == ResponseStatusEnum.SENT:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This response has already been sent and cannot be approved again.",
+            )
+        if lead.response_status == ResponseStatusEnum.APPROVED:
+            if candidate_draft != lead.response_draft:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Edit the approved draft before approving a changed version.",
+                )
+            business_rules = config_repo.get_config("business_rules").config_value
+            lead.risk_status, lead.at_risk_at = evaluate_risk(lead, business_rules)
+            return lead
     elif req.action == "edit" and (not draft_text or not draft_text.strip()):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -418,25 +445,17 @@ def process_response_action(
         lead.response_draft = draft_text
 
     if req.action == "approve":
-        lead.response_status = ResponseStatusEnum.SIMULATED_SENT
-        # Update lifecycle to contacted when operator approves response
-        if lead.lifecycle_status in [LifecycleStatusEnum.NEW, LifecycleStatusEnum.ANALYZED, LifecycleStatusEnum.FOLLOW_UP]:
-            lead.lifecycle_status = LifecycleStatusEnum.CONTACTED
-        # Suppress SLA risk upon response approval
-        lead.risk_status = RiskStatusEnum.NORMAL
-        
+        # Approval records human authorization only. There is no delivery
+        # provider configured, so lifecycle and SLA risk remain unchanged.
+        lead.response_status = ResponseStatusEnum.APPROVED
+        business_rules = config_repo.get_config("business_rules").config_value
+        lead.risk_status, lead.at_risk_at = evaluate_risk(lead, business_rules)
         return commit_action(
             AuditEventCreate(
                 lead_id=lead_id,
                 action="response_approved",
                 actor=f"user:{actor_id}",
-                details={"action": "approve"},
-            ),
-            AuditEventCreate(
-                lead_id=lead_id,
-                action="response_simulated_sent",
-                actor=f"user:{actor_id}",
-                details={"simulated": True, "notice": "No external message sent"},
+                details={"action": "approve", "delivery_status": "not_configured"},
             ),
         )
 
@@ -472,11 +491,12 @@ def update_lead_response(
     _operator=Depends(require_roles(settings.operator_role, settings.admin_role)),
     leads_repo: LeadsRepository = Depends(get_leads_repo),
     audit_repo: AuditRepository = Depends(get_audit_repo),
+    config_repo: ConfigRepository = Depends(get_config_repo),
 ):
     """
-    Canonical Human Response Workflow Endpoint: Approve & Simulate Send, Edit, or Reject.
+    Human response workflow endpoint: approve a draft, edit it, or reject it.
     """
-    return process_response_action(lead_id, req, leads_repo, audit_repo, _operator["sub"])
+    return process_response_action(lead_id, req, leads_repo, audit_repo, config_repo, _operator["sub"])
 
 
 @router.post("/{lead_id}/respond", response_model=Lead)
@@ -486,11 +506,12 @@ def respond_to_lead_alias(
     _operator=Depends(require_roles(settings.operator_role, settings.admin_role)),
     leads_repo: LeadsRepository = Depends(get_leads_repo),
     audit_repo: AuditRepository = Depends(get_audit_repo),
+    config_repo: ConfigRepository = Depends(get_config_repo),
 ):
     """
     Backwards-compatible alias for response approval workflow.
     """
-    return process_response_action(lead_id, req, leads_repo, audit_repo, _operator["sub"])
+    return process_response_action(lead_id, req, leads_repo, audit_repo, config_repo, _operator["sub"])
 
 
 @router.post("/{lead_id}/rescue")

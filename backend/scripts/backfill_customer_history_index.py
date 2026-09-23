@@ -1,47 +1,54 @@
 """Backfill customer-history GSI keys before deploying indexed history reads.
 
-Run from the deployment environment with least-privilege DynamoDB Scan and
-UpdateItem access. Defaults to dry-run; pass --apply to write the keys.
+Run for one isolated customer with least-privilege DynamoDB access. Defaults to
+dry-run; pass --apply to re-key the history indexes and write the migration marker.
 """
 
 import argparse
-import hashlib
-import re
+import sys
+from pathlib import Path
 
 import boto3
 from boto3.dynamodb.conditions import Attr
-
-
-def digest_key(tenant_id: str, kind: str, value: str | None) -> str | None:
-    if not value:
-        return None
-    normalized = value.strip().lower() if kind == "email" else re.sub(r"\D", "", value)
-    if not normalized:
-        return None
-    return f"{tenant_id}#{hashlib.sha256(normalized.encode('utf-8')).hexdigest()}"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from app.repositories.customer_index import customer_index_keys, index_hmac_key_id, load_index_hmac_key
+from app.repositories.customer_suppressions import history_index_marker_key
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--table", required=True, help="Leads DynamoDB table name")
-    parser.add_argument("--tenant-id", help="Only backfill this tenant; defaults to every tenant")
+    parser.add_argument("--tenant-id", required=True, help="Tenant ID for this isolated customer deployment")
     parser.add_argument("--region", help="AWS region; defaults to the boto3 region chain")
+    parser.add_argument("--index-secret-arn", required=True, help="Secrets Manager ARN used by the running API and worker")
+    parser.add_argument("--suppressions-table", required=True, help="CustomerSuppressionsTable used for the migration marker")
     parser.add_argument("--apply", action="store_true", help="Write keys (without this flag, only count changes)")
     args = parser.parse_args()
 
-    table = boto3.resource("dynamodb", region_name=args.region).Table(args.table)
+    index_hmac_key = load_index_hmac_key(args.index_secret_arn, args.region)
+    dynamodb = boto3.resource("dynamodb", region_name=args.region)
+    table = dynamodb.Table(args.table)
+    suppressions = dynamodb.Table(args.suppressions_table)
     scan_args = {"ProjectionExpression": "lead_id, tenant_id, customer_email, customer_phone"}
-    if args.tenant_id:
-        scan_args["FilterExpression"] = Attr("tenant_id").eq(args.tenant_id)
+    scan_args["FilterExpression"] = Attr("tenant_id").eq(args.tenant_id)
+
+    if args.apply:
+        # Removing the marker prevents readiness while indexes are re-keyed.
+        suppressions.delete_item(
+            Key={"suppression_key": history_index_marker_key(args.tenant_id)}
+        )
 
     scanned = changed = 0
     while True:
         page = table.scan(**scan_args)
         for item in page.get("Items", []):
             scanned += 1
-            email_key = digest_key(item["tenant_id"], "email", item.get("customer_email"))
-            phone_key = digest_key(item["tenant_id"], "phone", item.get("customer_phone"))
-            updates = {"tenant_email_key": email_key, "tenant_phone_key": phone_key}
+            updates = customer_index_keys(
+                item["tenant_id"],
+                item.get("customer_email"),
+                item.get("customer_phone"),
+                hmac_key=index_hmac_key,
+            )
             if all(item.get(key) == value for key, value in updates.items()):
                 continue
             changed += 1
@@ -75,6 +82,17 @@ def main() -> None:
 
     mode = "updated" if args.apply else "would update"
     print(f"Scanned {scanned} leads; {mode} {changed} customer-index records.")
+    if args.apply:
+        suppressions.put_item(
+            Item={
+                "suppression_key": history_index_marker_key(args.tenant_id),
+                "tenant_id": args.tenant_id,
+                "record_type": "CUSTOMER_HISTORY_INDEX_COMPLETE",
+                "index_key_scheme": "hmac-sha256-v1",
+                "index_key_id": index_hmac_key_id(index_hmac_key),
+            }
+        )
+        print("Customer-history index migration marked complete for this tenant and HMAC key.")
 
 
 if __name__ == "__main__":

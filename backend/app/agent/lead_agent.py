@@ -21,16 +21,15 @@ from app.agent.tools import get_business_rules, get_customer_history, get_lead
 from app.config.settings import settings
 from app.models.agent import AgentAnalysisResult
 from app.models.enums import CustomerStageEnum, IntentEnum, UrgencyEnum
+from app.services.pii_redaction import redact_inquiry_pii
 
 logger = logging.getLogger("leadrescue.agent")
 
 
 def is_aws_credentials_available() -> bool:
-    """Safely check if host environment has active AWS credentials."""
+    """Check whether an AWS credential provider is configured without a network probe."""
     try:
-        sts = boto3.client("sts", region_name=settings.aws_region or "us-east-1")
-        sts.get_caller_identity()
-        return True
+        return boto3.Session().get_credentials() is not None
     except Exception:
         return False
 
@@ -86,6 +85,10 @@ class LeadRescueAgent:
             customer_email=lead_data.get("customer_email"),
             customer_phone=lead_data.get("customer_phone"),
         )
+        # The customer-history index also matches the lead being analyzed. Exclude
+        # it so the model sees only prior interactions and a new lead is not
+        # mislabeled as a returning customer.
+        history = [item for item in history if item.get("lead_id") != lead_id]
         # Bound model context and avoid sending unnecessary customer history.
         history = sorted(history, key=lambda item: str(item.get("created_at", "")), reverse=True)[:10]
         events.append({"event": "tool_end", "tool": "get_customer_history", "count": len(history)})
@@ -137,12 +140,16 @@ class LeadRescueAgent:
                 )
                 model_context = {
                     "lead": {
-                        "customer_name": lead_data.get("customer_name"),
                         "source": lead_data.get("source"),
-                        "raw_message": lead_data.get("raw_message"),
+                        "raw_message": redact_inquiry_pii(
+                            lead_data.get("raw_message", ""),
+                            customer_name=lead_data.get("customer_name"),
+                            customer_email=lead_data.get("customer_email"),
+                            customer_phone=lead_data.get("customer_phone"),
+                        ),
                     },
-                    # The model only needs the returning/new signal. Keep contact
-                    # identifiers and prior message content inside the application.
+                    # Stored identifiers are omitted, and common identifiers in the
+                    # inquiry are redacted before it crosses the model boundary.
                     "customer_history": {"prior_interaction_count": len(history)},
                     "business_context": {
                         key: business_rules[key]
@@ -225,7 +232,7 @@ class LeadRescueAgent:
             urgency = UrgencyEnum.LOW
 
         # Customer stage
-        customer_stage = CustomerStageEnum.RETURNING if len(history) > 1 else CustomerStageEnum.NEW
+        customer_stage = CustomerStageEnum.RETURNING if history else CustomerStageEnum.NEW
 
         # Entity extraction (simple facts-only)
         key_entities = []

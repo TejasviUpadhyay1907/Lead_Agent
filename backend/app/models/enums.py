@@ -52,6 +52,8 @@ class RiskStatusEnum(str, Enum):
 class ResponseStatusEnum(str, Enum):
     DRAFT = "draft"
     APPROVED = "approved"
+    SENT = "sent"
+    # Kept for records written by earlier versions. This never proves delivery.
     SIMULATED_SENT = "simulated_sent"
     REJECTED = "rejected"
 

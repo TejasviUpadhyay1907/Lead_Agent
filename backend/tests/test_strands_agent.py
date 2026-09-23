@@ -87,3 +87,83 @@ def test_aws_credential_gate_check():
     """Verify is_aws_credentials_available returns boolean without crashing."""
     result = is_aws_credentials_available()
     assert isinstance(result, bool)
+
+
+def test_customer_history_excludes_current_lead_and_marks_prior_customer_returning(monkeypatch):
+    """The production model must receive only earlier interactions, not the current lead."""
+    repo = LeadsRepository(use_memory=True)
+    repo.create(
+        LeadCreate(
+            customer_name="Asha Rao",
+            customer_phone="+91-9876543210",
+            source="website",
+            raw_message="Please send the product catalog.",
+        )
+    )
+    current = repo.create(
+        LeadCreate(
+            customer_name="Asha Rao",
+            customer_phone="+91-9876543210",
+            source="whatsapp",
+            raw_message="I need a quote for CNC machines.",
+        )
+    )
+    monkeypatch.setattr("app.agent.tools.get_leads_repo", lambda: repo)
+
+    agent = LeadRescueAgent()
+    lead_data, history, business_rules, _events = agent._execute_tools_directly(current.lead_id)
+
+    assert lead_data["lead_id"] == current.lead_id
+    assert len(history) == 1
+    assert history[0]["lead_id"] != current.lead_id
+    result, _events = agent._generate_fallback_understanding(lead_data, history, business_rules)
+    assert result.customer_stage == CustomerStageEnum.RETURNING
+
+
+def test_live_model_context_excludes_stored_customer_identifiers(monkeypatch):
+    """Avoid sending contact fields and the stored name when they are not needed for analysis."""
+    repo = LeadsRepository(use_memory=True)
+    lead = repo.create(
+        LeadCreate(
+            customer_name="PRIVATE-NAME-7d94",
+            customer_email="private-address-7d94@example.com",
+            customer_phone="+19995550194",
+            source="website",
+            raw_message=(
+                "PRIVATE-NAME-7d94 needs one CNC machine. Call +1 (999) 555-0194 or email "
+                "private-address-7d94@example.com."
+            ),
+        )
+    )
+    monkeypatch.setattr("app.agent.tools.get_leads_repo", lambda: repo)
+    monkeypatch.setattr("app.agent.lead_agent.is_aws_credentials_available", lambda: True)
+    monkeypatch.setattr("app.agent.lead_agent.settings.bedrock_model_id", "test-model")
+    captured = {}
+
+    class FakeAgent:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __call__(self, prompt):
+            captured["prompt"] = prompt
+            return (
+                '{"intent":"purchase","urgency":"low","product":"CNC machine",'
+                '"quantity":1,"customer_stage":"new","key_entities":[],'
+                '"summary":"Requests one CNC machine.",'
+                '"recommended_action":"Confirm requirements.",'
+                '"response_draft":"Thanks for your inquiry. We will confirm the details."}'
+            )
+
+    monkeypatch.setattr("app.agent.lead_agent.BedrockModel", lambda **_kwargs: object())
+    monkeypatch.setattr("app.agent.lead_agent.Agent", FakeAgent)
+
+    result, _events = LeadRescueAgent().analyze_lead(lead.lead_id)
+
+    assert result.intent == IntentEnum.PURCHASE
+    assert "PRIVATE-NAME-7d94" not in captured["prompt"]
+    assert "private-address-7d94@example.com" not in captured["prompt"]
+    assert "+19995550194" not in captured["prompt"]
+    assert "[REDACTED_NAME]" in captured["prompt"]
+    assert "[REDACTED_EMAIL]" in captured["prompt"]
+    assert "[REDACTED_PHONE]" in captured["prompt"]
+    assert repo.get_by_id(lead.lead_id).raw_message.endswith("private-address-7d94@example.com.")

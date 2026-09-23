@@ -43,3 +43,4 @@ frontend/dist - Copy/
 frontend/package-lock - Copy.json
 backend/pytest.log
 outputs/audit-baseline-build/
+.firecrawl/

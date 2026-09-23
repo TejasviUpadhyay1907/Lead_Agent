@@ -16,4 +16,4 @@ def test_health_check():
     data = response.json()
     assert data["status"] == "healthy"
     assert data["service"] == "leadrescue-ai"
-    assert data["phase"] == "backend_foundation"
+    assert data == {"status": "healthy", "service": "leadrescue-ai"}

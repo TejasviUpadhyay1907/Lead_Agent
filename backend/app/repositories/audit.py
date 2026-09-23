@@ -13,11 +13,11 @@ from app.repositories.pagination import decode_cursor, encode_cursor
 
 class AuditRepository:
     def __init__(self, use_memory: bool = False):
-        self.use_memory = use_memory
+        self.use_memory = use_memory or settings.demo_enabled
         self._memory_store: Dict[str, AuditEvent] = {}
         self._table = None
 
-        if not use_memory:
+        if not self.use_memory:
             dynamodb = get_boto3_dynamodb_resource()
             if dynamodb and settings.audit_table:
                 try:

@@ -4,6 +4,7 @@ Provides persistence operations for Lead records (DynamoDB & Memory fallback).
 """
 
 from datetime import datetime, timedelta, timezone
+import time
 from typing import Dict, List, Optional, Sequence
 from botocore.exceptions import ClientError
 from boto3.dynamodb.types import TypeSerializer
@@ -15,7 +16,13 @@ from app.models.followup import FollowUp
 from app.repositories.base import get_boto3_dynamodb_resource
 from app.repositories.pagination import decode_cursor, encode_cursor
 from app.repositories.customer_index import customer_index_keys
-from app.repositories.customer_suppressions import migration_marker_key, suppression_items, suppression_keys
+from app.repositories.customer_suppressions import (
+    history_index_marker_key,
+    migration_marker_key,
+    suppression_items,
+    suppression_keys,
+)
+from app.repositories.customer_index import require_customer_index_key
 
 
 class ConcurrentLeadUpdateError(Exception):
@@ -24,6 +31,10 @@ class ConcurrentLeadUpdateError(Exception):
 
 class SuppressionMigrationIncompleteError(RuntimeError):
     """Raised until legacy opt-outs are loaded into the durable suppression registry."""
+
+
+class SuppressionRegistryUnavailableError(RuntimeError):
+    """Raised when suppression state cannot be checked safely."""
 
 
 def _serialize_item(item: dict) -> dict:
@@ -48,14 +59,14 @@ class LeadsRepository:
     """Repository for Lead operations."""
 
     def __init__(self, use_memory: bool = False):
-        self.use_memory = use_memory
+        self.use_memory = use_memory or settings.demo_enabled
         self._memory_store: Dict[str, Lead] = {}
         self._memory_suppressions: set[str] = set()
         self._table = None
         self._suppressions_table = None
         self._suppressions_ready = use_memory
 
-        if not use_memory:
+        if not self.use_memory:
             dynamodb = get_boto3_dynamodb_resource()
             if dynamodb and settings.leads_table:
                 try:
@@ -72,19 +83,10 @@ class LeadsRepository:
                 self.use_memory = True
         if self._suppressions_table is None and not settings.demo_enabled:
             raise RuntimeError("Customer opt-out suppression storage is required")
-        if self.use_memory or self._suppressions_table is None:
+        # Avoid network I/O during app import and Lambda cold start. Readiness
+        # is checked lazily by /ready and before operations that need it.
+        if self.use_memory:
             self._suppressions_ready = True
-        if self._suppressions_table:
-            try:
-                self._suppressions_ready = bool(
-                    self._suppressions_table.get_item(
-                        Key={"suppression_key": migration_marker_key(settings.effective_tenant_id)},
-                        ConsistentRead=True,
-                    ).get("Item")
-                )
-            except Exception:
-                if not settings.demo_enabled:
-                    raise
 
     def customer_opted_out(self, lead: Lead) -> bool:
         """Check the durable tenant-scoped suppression registry using strongly consistent reads."""
@@ -99,10 +101,82 @@ class LeadsRepository:
                 and target_keys.intersection(suppression_keys(item.tenant_id, item.customer_email, item.customer_phone))
                 for item in self._memory_store.values()
             )
-        for key in keys:
-            if key and self._suppressions_table.get_item(Key={"suppression_key": key}, ConsistentRead=True).get("Item"):
-                return True
+        try:
+            for key in keys:
+                if key and self._suppressions_table.get_item(Key={"suppression_key": key}, ConsistentRead=True).get("Item"):
+                    return True
+        except Exception as exc:
+            raise SuppressionRegistryUnavailableError(
+                "Customer opt-out registry could not be checked"
+            ) from exc
         return False
+
+    def customer_opted_out_many(self, leads: Sequence[Lead]) -> set[str]:
+        """Return opted-out lead IDs with bounded, strongly consistent reads.
+
+        DynamoDB BatchGetItem accepts at most 100 keys per request. Unprocessed
+        keys are retried with bounded backoff; unresolved keys raise so the API
+        fails closed instead of treating an incomplete lookup as consent.
+        """
+        self._ensure_suppressions_ready()
+        key_to_lead_ids: Dict[str, set[str]] = {}
+        for lead in leads:
+            for key in suppression_keys(settings.effective_tenant_id, lead.customer_email, lead.customer_phone):
+                key_to_lead_ids.setdefault(key, set()).add(lead.lead_id)
+
+        if not key_to_lead_ids:
+            return set()
+
+        if self.use_memory or not self._suppressions_table:
+            suppressed_keys = set(self._memory_suppressions)
+            for item in self._memory_store.values():
+                if item.lifecycle_status.value == "opted_out":
+                    suppressed_keys.update(
+                        key for key in suppression_keys(item.tenant_id, item.customer_email, item.customer_phone) if key
+                    )
+            return {
+                lead_id
+                for key in suppressed_keys.intersection(key_to_lead_ids)
+                for lead_id in key_to_lead_ids[key]
+            }
+
+        client = self._suppressions_table.meta.client
+        suppression_table = settings.customer_suppressions_table
+        unique_keys = list(key_to_lead_ids)
+        suppressed_lead_ids: set[str] = set()
+        for offset in range(0, len(unique_keys), 100):
+            pending = {
+                suppression_table: {
+                    "Keys": [
+                        {"suppression_key": {"S": key}}
+                        for key in unique_keys[offset:offset + 100]
+                    ],
+                    "ConsistentRead": True,
+                    "ProjectionExpression": "suppression_key",
+                }
+            }
+            for attempt in range(5):
+                try:
+                    response = client.batch_get_item(RequestItems=pending)
+                except Exception as exc:
+                    raise SuppressionRegistryUnavailableError(
+                        "Customer opt-out registry could not be checked"
+                    ) from exc
+                for item in response.get("Responses", {}).get(suppression_table, []):
+                    key = item.get("suppression_key", {}).get("S")
+                    if key:
+                        suppressed_lead_ids.update(key_to_lead_ids.get(key, ()))
+
+                pending = response.get("UnprocessedKeys", {})
+                if not pending:
+                    break
+                if attempt == 4:
+                    raise SuppressionRegistryUnavailableError(
+                        "DynamoDB did not process all customer suppression lookups"
+                    )
+                time.sleep(0.05 * (2 ** attempt))
+
+        return suppressed_lead_ids
 
     def _suppression_transaction_items(self, lead: Lead) -> list[dict]:
         """Atomically record opt-outs or reject outreach writes racing with an opt-out."""
@@ -125,23 +199,37 @@ class LeadsRepository:
         ]
 
     def _ensure_suppressions_ready(self) -> None:
-        if not self._suppressions_ready:
-            if self._suppressions_table:
-                self._suppressions_ready = bool(
-                    self._suppressions_table.get_item(
-                        Key={"suppression_key": migration_marker_key(settings.effective_tenant_id)},
+        if not self._suppressions_ready and self._suppressions_table:
+            try:
+                marker = self._suppressions_table.get_item(
+                    Key={"suppression_key": migration_marker_key(settings.effective_tenant_id)},
+                    ConsistentRead=True,
+                ).get("Item")
+                if marker and marker.get("index_key_scheme") == "hmac-sha256-v1":
+                    active_key_id = require_customer_index_key()
+                    history_marker = self._suppressions_table.get_item(
+                        Key={"suppression_key": history_index_marker_key(settings.effective_tenant_id)},
                         ConsistentRead=True,
                     ).get("Item")
-                )
+                    self._suppressions_ready = bool(
+                        marker.get("index_key_id") == active_key_id
+                        and history_marker
+                        and history_marker.get("index_key_scheme") == "hmac-sha256-v1"
+                        and history_marker.get("index_key_id") == active_key_id
+                    )
+                else:
+                    self._suppressions_ready = False
+            except Exception as exc:
+                raise SuppressionRegistryUnavailableError(
+                    "Customer opt-out registry could not be checked"
+                ) from exc
         if not self._suppressions_ready:
             raise SuppressionMigrationIncompleteError("Customer opt-out backfill must finish before lead operations resume")
 
     def suppression_registry_ready(self) -> bool:
-        try:
-            self._ensure_suppressions_ready()
-            return True
-        except Exception:
-            return False
+        self._ensure_suppressions_ready()
+        require_customer_index_key()
+        return True
 
     def create(self, lead_create: LeadCreate) -> Lead:
         lead = Lead(**lead_create.model_dump())

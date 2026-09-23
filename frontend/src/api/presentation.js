@@ -3,6 +3,9 @@ export const humanize = value => value == null || value === '' ? 'Not available'
 export const isBlocked = lead => ['opted_out', 'resolved'].includes(lead?.lifecycle_status);
 export const isOptedOut = lead => lead?.lifecycle_status === 'opted_out';
 export const isPendingResponse = lead => !isBlocked(lead) && ['draft', 'edited'].includes(lead?.response_status);
+export const isAwaitingDelivery = lead => !isBlocked(lead) && ['approved', 'simulated_sent'].includes(lead?.response_status);
+export const isConfirmedSent = lead => lead?.response_status === 'sent';
+export const lifecyclePresentationStatus = lead => lead?.response_status === 'simulated_sent' && lead?.lifecycle_status === 'contacted' ? 'contact_unverified' : lead?.lifecycle_status;
 export const dateTime = value => value && Number.isFinite(new Date(value).getTime()) ? new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : 'Not available';
 export const timeOnly = value => value && Number.isFinite(new Date(value).getTime()) ? new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : 'Unavailable';
 export function relativeDue(value, now) {

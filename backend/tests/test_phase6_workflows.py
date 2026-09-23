@@ -49,10 +49,10 @@ def test_rahul_sharma_end_to_end_workflow():
     12. Verify follow-up created
     13. Verify human approval is still required
     14. Approve response
-    15. Verify response_status = simulated_sent
-    16. Verify external send was NOT claimed
+    15. Verify response_status = approved
+    16. Verify no external send or contact state was claimed
     17. Verify audit trail
-    18. Verify risk is no longer active for the responded lead
+    18. Verify the breached SLA remains active until actual delivery
     """
     # 1. Create Rahul
     create_res = client.post(
@@ -110,11 +110,19 @@ def test_rahul_sharma_end_to_end_workflow():
     )
     assert resp_res.status_code == 200
     responded = resp_res.json()
-    assert responded["response_status"] == "simulated_sent"
-    assert responded["lifecycle_status"] == "contacted"
+    assert responded["response_status"] == "approved"
+    assert responded["lifecycle_status"] == get_res_2.json()["lifecycle_status"]
     
-    # 17-18. Verify risk is no longer active for responded lead
-    assert responded["risk_status"] == "normal"
+    # 17-18. Approval does not deliver the message or satisfy the response SLA.
+    assert responded["risk_status"] == "at_risk"
+
+    # Repeated approval is idempotent and does not add another audit event.
+    repeated_approval = client.put(
+        f"/api/leads/{lead_id}/response",
+        json={"action": "approve"},
+    )
+    assert repeated_approval.status_code == 200
+    assert repeated_approval.json()["response_status"] == "approved"
 
     # Verify Audit Trail
     audit_res = client.get(f"/api/leads/{lead_id}/audit")
@@ -124,7 +132,8 @@ def test_rahul_sharma_end_to_end_workflow():
     assert "lead_analyzed" in actions
     assert "rescue_triggered" in actions
     assert "response_approved" in actions
-    assert "response_simulated_sent" in actions
+    assert actions.count("response_approved") == 1
+    assert "response_simulated_sent" not in actions
 
 
 def test_sunita_rao_end_to_end_opt_out_workflow():

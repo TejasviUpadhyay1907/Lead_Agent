@@ -57,10 +57,15 @@ Parameters:
   WebhookSecretArn:
     Type: String
     Description: ARN of the Secrets Manager secret holding the inbound webhook HMAC secret.
+  CustomerIndexSecretArn:
+    Type: String
+    Description: ARN of the Secrets Manager string secret holding this deployment's customer-index HMAC key.
   BedrockModelId:
     Type: String
-    Description: Active Bedrock foundation model ID
-    Default: "us.amazon.nova-lite-v1:0"
+    Description: Required system-defined geographic Bedrock inference profile ID. Select a geography approved for this tenant's data.
+  BedrockFoundationModelId:
+    Type: String
+    Description: Required foundation model ID associated with BedrockModelId; it must match the selected profile.
   AlarmTopicArn:
     Type: String
     AllowedPattern: "^arn:[a-z0-9-]+:sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]+(\\.fifo)?$"
@@ -157,6 +162,7 @@ Resources:
           ANALYSIS_JOBS_TABLE: !Ref AnalysisJobsTable
           ANALYSIS_QUEUE_URL: !Ref AnalysisJobsQueue
           WEBHOOK_SECRET_ARN: !Ref WebhookSecretArn
+          CUSTOMER_INDEX_SECRET_ARN: !Ref CustomerIndexSecretArn
       Policies:
         # Grant only the operations used by the repositories and their indexes.
         - Statement:
@@ -191,7 +197,7 @@ Resources:
               Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem]
               Resource: !GetAtt AnalysisJobsTable.Arn
             - Effect: Allow
-              Action: dynamodb:GetItem
+              Action: [dynamodb:GetItem, dynamodb:BatchGetItem]
               Resource: !GetAtt CustomerSuppressionsTable.Arn
             - Effect: Allow
               Action: sqs:SendMessage
@@ -201,8 +207,18 @@ Resources:
             - Effect: Allow
               Action:
                 - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
               Resource:
-                - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}"
+                - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockModelId}"
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource:
+                - !Sub "arn:${AWS::Partition}:bedrock:*::foundation-model/${BedrockFoundationModelId}"
+              Condition:
+                StringEquals:
+                  bedrock:InferenceProfileArn: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockModelId}"
         - Statement:
             - Effect: Allow
               Action:
@@ -224,6 +240,11 @@ Resources:
               Action:
                 - secretsmanager:GetSecretValue
               Resource: !Ref WebhookSecretArn
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref CustomerIndexSecretArn
       Events:
         ApiProxy:
           Type: Api
@@ -261,6 +282,7 @@ Resources:
           ANALYSIS_JOBS_TABLE: !Ref AnalysisJobsTable
           CUSTOMER_SUPPRESSIONS_TABLE: !Ref CustomerSuppressionsTable
           ANALYSIS_DLQ_ARN: !GetAtt AnalysisJobsDeadLetterQueue.Arn
+          CUSTOMER_INDEX_SECRET_ARN: !Ref CustomerIndexSecretArn
       Policies:
         - Statement:
             - Effect: Allow
@@ -301,8 +323,23 @@ Resources:
                 - !GetAtt AuditTable.Arn
                 - !GetAtt CustomerSuppressionsTable.Arn
             - Effect: Allow
-              Action: bedrock:InvokeModel
-              Resource: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}"
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource:
+                - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockModelId}"
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource:
+                - !Sub "arn:${AWS::Partition}:bedrock:*::foundation-model/${BedrockFoundationModelId}"
+              Condition:
+                StringEquals:
+                  bedrock:InferenceProfileArn: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockModelId}"
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref CustomerIndexSecretArn
       Events:
         AnalysisQueue:
           Type: SQS

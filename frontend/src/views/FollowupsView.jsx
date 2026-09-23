@@ -3,7 +3,7 @@ import { CalendarClock, Check, ChevronRight, AlertTriangle, RefreshCw, Inbox } f
 import { PriorityBadge } from '../components/Common/Badge';
 import { PageHeader, EmptyState, ErrorState, Notice, Skeleton, BusyLabel } from '../components/Common/UI';
 import { api } from '../api/client';
-import { followupBucket, relativeDue, dateTime, humanize, isBlocked, safeError } from '../api/presentation';
+import { followupBucket, relativeDue, dateTime, humanize, isBlocked, lifecyclePresentationStatus, safeError } from '../api/presentation';
 
 /** Tabs mirror the API-owned follow-up states. Nothing is inferred from names or ordering. */
 const TABS = [
@@ -178,7 +178,7 @@ export function FollowupsView({ followups, leads, onSelectLead, onRefreshLeads, 
                             const reason = !leadKnown
                                 ? 'Lead record not loaded — action unavailable'
                                 : isBlocked(lead)
-                                    ? `Lead is ${humanize(lead.lifecycle_status).toLowerCase()} — outreach blocked`
+                                    ? `Lead is ${humanize(lifecyclePresentationStatus(lead)).toLowerCase()} — outreach blocked`
                                     : null;
 
                             return (

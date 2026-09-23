@@ -52,8 +52,12 @@ jobs:
       - name: Reject a stale Python lock
         run: git diff --exit-code -- backend/requirements.txt
         working-directory: .
+      - name: Install backend and test dependencies
+        run: uv pip install --system -r requirements-dev.txt
       - name: Check backend Python syntax
         run: python -m compileall -q app scripts
+      - name: Run backend behavioral tests
+        run: python -m pytest -q
       - name: Validate SAM template
         working-directory: .
         run: sam validate --template-file template.yaml --lint

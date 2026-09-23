@@ -29,7 +29,8 @@ def evaluate_risk(lead: Lead, business_rules: Dict[str, any]) -> Tuple[RiskStatu
     """
     Evaluates risk status:
     at_risk_at = created_at + response_target_minutes
-    Risk is AT_RISK if effective_now() >= at_risk_at AND response_status != simulated_sent AND lifecycle not in (resolved, opted_out).
+    Risk is AT_RISK if effective_now() >= at_risk_at and no provider-confirmed
+    response was sent, unless lifecycle is resolved or opted out.
     """
     response_target = business_rules.get("response_target_minutes", 20)
     at_risk_at_iso = calculate_at_risk_timestamp(lead.created_at, response_target)
@@ -38,8 +39,9 @@ def evaluate_risk(lead: Lead, business_rules: Dict[str, any]) -> Tuple[RiskStatu
     if lead.lifecycle_status in [LifecycleStatusEnum.RESOLVED, LifecycleStatusEnum.OPTED_OUT]:
         return RiskStatusEnum.NORMAL, at_risk_at_iso
 
-    # Sent responses are safe
-    if lead.response_status == ResponseStatusEnum.SIMULATED_SENT:
+    # Only a provider-confirmed send satisfies the response SLA. Approval and
+    # legacy simulated-send records do not establish that a customer was reached.
+    if lead.response_status == ResponseStatusEnum.SENT:
         return RiskStatusEnum.NORMAL, at_risk_at_iso
 
     # Parse at_risk_at dt

@@ -8,7 +8,7 @@ import { StatCard } from '../components/Common/StatCard';
 import {
     PageHeader, SectionHeader, WorkflowStrip, EmptyState, ErrorState, Notice, BusyLabel, Avatar,
 } from '../components/Common/UI';
-import { humanize, isPendingResponse, dateTime, timeOnly, relativeDue, followupBucket, safeError } from '../api/presentation';
+import { humanize, isPendingResponse, isAwaitingDelivery, dateTime, timeOnly, relativeDue, followupBucket, safeError } from '../api/presentation';
 
 const normalize = value => (value == null ? '' : String(value).toLowerCase());
 const scoreOf = lead => (typeof lead.score === 'number' ? lead.score : null);
@@ -29,12 +29,13 @@ const truncate = (text, max = 150) => {
 function attentionRank(lead) {
     if (normalize(lead.risk_status) === 'at_risk') return 0;
     if (isPendingResponse(lead)) return 1;
-    if (normalize(lead.lifecycle_status) === 'new') return 2;
+    if (isAwaitingDelivery(lead) || normalize(lead.lifecycle_status) === 'new') return 2;
     return 3;
 }
 const attentionReason = lead => {
     if (normalize(lead.risk_status) === 'at_risk') return 'At risk';
     if (isPendingResponse(lead)) return 'Draft awaiting approval';
+    if (isAwaitingDelivery(lead)) return 'Approved · not delivered';
     return 'New inquiry';
 };
 const priorityTone = key => (['hot', 'warm', 'cold'].includes(key) ? key : 'neutral');
@@ -260,10 +261,10 @@ export function DashboardView({
                                 <SectionHeader
                                     icon={UserCheck}
                                     title="Human approval"
-                                    subtitle="Drafts only send after a person approves"
+                                    subtitle="Approval records review; delivery is not configured"
                                     layer="human"
                                 >
-                                    <span className="badge-sub">{pending} pending</span>
+                                    <span className="badge-sub">{pending} pending approval · {leads.filter(isAwaitingDelivery).length} approved, not delivered</span>
                                 </SectionHeader>
 
                                 {approvalQueue.length === 0 ? (

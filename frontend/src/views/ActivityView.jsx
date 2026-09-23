@@ -3,7 +3,7 @@ import { Activity, History, Search, ExternalLink } from 'lucide-react';
 import { api } from '../api/client';
 import { PageHeader, SectionHeader, EmptyState, ErrorState, Skeleton, Avatar } from '../components/Common/UI';
 import { ActivityTimeline } from '../components/Common/ActivityTimeline';
-import { humanize, safeError } from '../api/presentation';
+import { humanize, lifecyclePresentationStatus, safeError } from '../api/presentation';
 
 /**
  * Audit inspection is scoped to a single lead at a time.
@@ -155,7 +155,7 @@ export function ActivityView({ leads, revision, onSelectLead }) {
                                             <Avatar name={lead.customer_name} />
                                             <span className="lead-select-main">
                                                 <span className="lead-select-name">{lead.customer_name || 'Unnamed lead'}</span>
-                                                <span className="lead-select-meta">{humanize(lead.lifecycle_status)}</span>
+                                                <span className="lead-select-meta">{humanize(lifecyclePresentationStatus(lead))}</span>
                                             </span>
                                         </button>
                                     </li>

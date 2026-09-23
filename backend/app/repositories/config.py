@@ -44,11 +44,11 @@ def _serialize_item(item: dict) -> dict:
 
 class ConfigRepository:
     def __init__(self, use_memory: bool = False):
-        self.use_memory = use_memory
+        self.use_memory = use_memory or settings.demo_enabled
         self._memory_store: Dict[str, ConfigModel] = {}
         self._table = None
 
-        if not use_memory:
+        if not self.use_memory:
             dynamodb = get_boto3_dynamodb_resource()
             if dynamodb and settings.config_table:
                 try:

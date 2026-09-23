@@ -33,20 +33,31 @@ def test_risk_before_and_after_at_risk_at():
     reset_simulated_now()
 
 
-def test_risk_sent_or_resolved_suppresses_at_risk():
+def test_only_confirmed_send_or_resolved_suppresses_at_risk():
     t0 = datetime(2026, 9, 19, 10, 0, 0, tzinfo=timezone.utc)
     t_30m = t0 + timedelta(minutes=30)
     set_simulated_now(t_30m)
 
-    # Simulated sent lead
+    # A provider-confirmed send satisfies the response target.
     sent_lead = Lead(
         customer_name="Sent Lead",
         raw_message="Test",
         created_at=t0.isoformat(),
-        response_status=ResponseStatusEnum.SIMULATED_SENT,
+        response_status=ResponseStatusEnum.SENT,
     )
     status, _ = evaluate_risk(sent_lead, {"response_target_minutes": 20})
     assert status == RiskStatusEnum.NORMAL
+
+    # Approval and legacy simulated sends do not prove that the customer was reached.
+    for response_status in (ResponseStatusEnum.APPROVED, ResponseStatusEnum.SIMULATED_SENT):
+        unconfirmed_lead = Lead(
+            customer_name="Unconfirmed Lead",
+            raw_message="Test",
+            created_at=t0.isoformat(),
+            response_status=response_status,
+        )
+        status, _ = evaluate_risk(unconfirmed_lead, {"response_target_minutes": 20})
+        assert status == RiskStatusEnum.AT_RISK
 
     # Resolved lead
     resolved_lead = Lead(

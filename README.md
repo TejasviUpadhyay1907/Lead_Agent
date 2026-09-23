@@ -120,13 +120,40 @@ BEDROCK_MODEL_ID=<active-model-id>
 DEMO_MODE=true
 ```
 
+For SAM production deployment, set both required Bedrock parameters: `BedrockModelId` is a **system-defined geographic inference profile ID** and `BedrockFoundationModelId` is its matching foundation model ID. The template deliberately has no default profile: a profile such as `us.amazon.nova-lite-v1:0` routes inference within the US geography, which may be inappropriate for a customer's data-residency policy. Choose the profile, source AWS Region, and model only after checking the current [Bedrock model page](https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html) and obtaining the customer's approval for the full destination geography. The current SAM policies support geographic cross-Region profiles; in-Region-only inference and global profiles require a separately reviewed IAM configuration. The API and worker permissions cover the exact profile and only its matching foundation model, with foundation-model invocation constrained to that profile.
+
+Before deployment, inspect the profile's current destinations with `aws bedrock get-inference-profile --inference-profile-identifier <profile-id> --region <source-region>`. After the customer approves the complete destination set, run the read-only validator (using credentials permitted to call `bedrock:GetInferenceProfile`):
+
+```powershell
+python backend/scripts/validate_bedrock_profile.py `
+  --profile-id <profile-id> `
+  --foundation-model-id <foundation-model-id> `
+  --source-region <source-region> `
+  --approved-destination-region <approved-region-1> `
+  --approved-destination-region <approved-region-2>
+```
+
+The validator fails if the profile is inactive, is not a system-defined profile, belongs to another source Region, targets a different foundation model, or routes to a Region missing from the customer's approved list. It does not deploy, invoke the model, or establish that the production Lambda role has working inference permissions; those still require staging verification.
+
 `DEMO_MODE=true` is for local/demo data only. A production deployment must use `DEMO_MODE=false` and configure `JWT_ISSUER`, `JWT_JWKS_URL`, `JWT_AUDIENCE`, `JWT_REQUIRED_SCOPE`, `TENANT_ID`, `ADMIN_ROLE`, and `OPERATOR_ROLE`; SAM requires the identity values at deployment. The frontend includes OIDC Authorization Code with PKCE sign-in, but the provider configuration and role claims still require staging validation. The first supported commercial topology is one isolated deployment per customer; shared SaaS is not implemented.
+
+When demo mode is enabled in a local/test environment, repositories use in-memory synthetic data even if AWS credentials are present. This prevents local demos and tests from accidentally reading or writing a configured company database. Production SAM deployments set demo mode off and use DynamoDB.
 
 For the browser sign-in flow, copy [frontend/.env.example](frontend/.env.example) to `frontend/.env` and set the customer's OIDC issuer, public client, API scope, and exact HTTPS redirect URI. The identity provider must allow the frontend origin and use Authorization Code with PKCE. Browser tokens remain in memory; users sign in again after a full page reload unless the identity provider reuses its SSO session.
 
 Existing DynamoDB stacks require the tenant GSI update and [backfill migration](backend/scripts/backfill_tenant_data.py) before the updated API serves traffic. Run the script once per isolated customer: first without `--apply` to review counts, then with `--apply` only after confirming that the whole table belongs to that tenant. The script rejects rows already assigned to a different tenant.
 
-Existing lead tables also need the customer-history index migration: deploy the `LeadsTable` GSI additions while the API remains offline, wait for `tenant-email-index` and `tenant-phone-index` to become `ACTIVE`, then run `python backend/scripts/backfill_customer_history_index.py --table leadrescue-leads --tenant-id <tenant> --region <region>` once as a dry run and again with `--apply`. Only then deploy/enable the API version that uses indexed history. New writes populate the hashed index keys automatically. These index keys are SHA-256 digests of normalized email/phone values with the tenant ID as prefix; raw identity values are not used as index partition keys.
+Before production deployment, create a dedicated per-customer index HMAC secret and pass its ARN as `CustomerIndexSecretArn`. With AWS credentials authorized for `secretsmanager:GetRandomPassword` and `secretsmanager:CreateSecret`, run:
+
+```bash
+python backend/scripts/create_customer_index_secret.py \
+  --name leadrescue/customer-index-hmac \
+  --region <deployment-region>
+```
+
+The API and worker receive `GetSecretValue` access only to this configured secret. A 64-character generated `hmac_key` is used to derive tenant-scoped contact indexes and suppression keys. These are keyed pseudonyms; lead records still contain the contact fields needed by sales staff. Keep the key stable: key rotation changes every lookup key and can break customer-history matching and opt-out enforcement. Rotation needs a planned intake/worker pause, a new secret ARN, both index and suppression backfills with the new key, and verified reconciliation before traffic resumes; automatic key rotation is not supported. Completion markers record a short key fingerprint so the API stays unready if the backfills and active secret do not match.
+
+Existing lead tables also need the customer-history index migration: deploy the `LeadsTable` GSI additions and `CustomerSuppressionsTable` while API intake and analysis are paused, wait for `tenant-email-index` and `tenant-phone-index` to become `ACTIVE`, then run `python backend/scripts/backfill_customer_history_index.py --table leadrescue-leads --tenant-id <tenant> --region <region> --index-secret-arn <customer-index-secret-arn> --suppressions-table leadrescue-customer-suppressions` once as a dry run and again with `--apply`. The migration identity needs `Scan` and `UpdateItem` on the lead table, `DeleteItem` and `PutItem` on the suppression table, and `GetSecretValue` on the exact index-key secret. Applying the migration removes its readiness marker before changing records and recreates it only after a complete scan. New writes populate HMAC-derived index keys; raw identity values are not used as index partition keys.
 
 The SAM template enables point-in-time recovery on lead, follow-up, audit, and configuration tables. Lambda logs expire after 90 days by default (`LogRetentionDays`). Every deployment must provide `AlarmTopicArn` for an SNS topic in the deployment region; the stack wires API and analysis-worker error/throttle alarms plus queue-age and dead-letter alarms to it. Confirm the topic has verified on-call subscribers and permits CloudWatch alarm delivery before deployment. If a Lambda log group already exists outside CloudFormation, import it into stack management before the first update; preserve its existing log history.
 
@@ -138,9 +165,9 @@ Lead analysis in the browser uses the durable job endpoint (`POST /api/leads/{le
 
 Company admins can download one lead record and its linked follow-ups and complete audit history from the lead detail page (`GET /api/privacy/leads/{lead_id}/export`). The export is tenant-scoped, marked no-store, and creates an audit event. This is a per-lead operational export; it does not locate every record for a person or replace a formal subject-access/deletion workflow.
 
-Opt-outs apply to the contact across future leads matched by normalized email or phone. Before enabling this release on an existing deployment, pause API intake/outreach and the analysis worker event source, deploy the `CustomerSuppressionsTable`, run `python backend/scripts/backfill_customer_suppressions.py --leads-table leadrescue-leads --suppressions-table leadrescue-customer-suppressions --tenant-id <tenant> --region <region>` as a dry run, review the count, then repeat with `--apply` using a separate migration identity with scoped DynamoDB scan/write access. The API, webhook, and worker fail closed until the migration writes its tenant completion marker; `/ready` stays `503` until then. Resume intake and the worker only after the apply command completes and `/ready` returns `200`. New opt-outs and state-changing workflows update the suppression registry transactionally. The registry is durable and has no TTL; removing an opt-out requires verified consent and a separately controlled process that is not yet implemented.
+Opt-outs apply to the contact across future leads matched by normalized email or phone. Before enabling this release on an existing deployment, pause API intake/outreach and the analysis worker event source. Run `python backend/scripts/backfill_customer_suppressions.py --leads-table leadrescue-leads --suppressions-table leadrescue-customer-suppressions --tenant-id <tenant> --region <region> --index-secret-arn <customer-index-secret-arn>` as a dry run, review the count, then repeat with `--apply` using a separate migration identity with scoped DynamoDB scan/write/delete and `secretsmanager:GetSecretValue` access to the exact index-key secret. Applying removes the prior readiness marker first, so an interrupted migration stays fail-closed. The API, webhook, and worker require both migration completion markers to match the active HMAC key; `/ready` stays `503` until customer-history indexes and opt-out markers are backfilled with that key. Resume intake and the worker only after both apply commands complete and `/ready` returns `200`. New opt-outs and state-changing workflows update the suppression registry transactionally. The registry is durable and has no TTL; removing an opt-out requires verified consent and a separately controlled process that is not yet implemented.
 
-API Gateway throttling defaults to 50 requests per second with a burst of 100 per customer deployment. Tune `ApiRateLimit` and `ApiBurstLimit` for the customer's traffic profile; the analysis worker also has a separate concurrency cap.
+API Gateway throttling defaults to 50 requests per second with a burst of 100 per customer deployment. Tune `apiRateLimit` and `apiBurstLimit` for the customer's traffic profile; the analysis worker also has a separate concurrency cap.
 
 Company settings must contain business rules only. Secret-like keys are rejected on updates, and legacy values are masked in API responses; store connector credentials in AWS Secrets Manager instead.
 
@@ -151,7 +178,7 @@ Company settings must contain business rules only. Secret-like keys are rejected
 - **Tracks:** Ship It (deployed) + Best UI
 - **AI Tools Used:** Antigravity
 
-This section records the project origin. It is not a claim of production readiness, customer data integration, or live message delivery. Approval currently simulates sending. Production deployments must configure trusted origins and keep `DEMO_MODE=false`.
+This section records the project origin. It is not a claim of production readiness, customer data integration, or live message delivery. Approval records human review only; no customer message is delivered until an outbound provider is configured. Production deployments must configure trusted origins and keep `DEMO_MODE=false`.
 
 ## License
 

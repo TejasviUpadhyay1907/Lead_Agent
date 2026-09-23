@@ -11,7 +11,11 @@ from app.api.router import api_router
 from app.api.webhooks import router as webhooks_router
 from app.api.deps import get_leads_repo
 from app.config.settings import settings
-from app.repositories.leads import SuppressionMigrationIncompleteError
+from app.repositories.leads import (
+    SuppressionMigrationIncompleteError,
+    SuppressionRegistryUnavailableError,
+)
+from app.repositories.customer_index import CustomerIndexKeyUnavailableError
 
 app = FastAPI(
     title="LeadRescue AI",
@@ -26,6 +30,24 @@ async def suppression_migration_incomplete(_request: Request, _exc: SuppressionM
         status_code=503,
         content={"detail": "Customer opt-out data is being migrated. Retry after the company administrator completes the rollout."},
         headers={"Retry-After": "300"},
+    )
+
+
+@app.exception_handler(SuppressionRegistryUnavailableError)
+async def suppression_registry_unavailable(_request: Request, _exc: SuppressionRegistryUnavailableError):
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Customer opt-out status is temporarily unavailable. Retry shortly."},
+        headers={"Retry-After": "30"},
+    )
+
+
+@app.exception_handler(CustomerIndexKeyUnavailableError)
+async def customer_index_key_unavailable(_request: Request, _exc: CustomerIndexKeyUnavailableError):
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Customer identity lookup is temporarily unavailable. Retry shortly."},
+        headers={"Retry-After": "30"},
     )
 
 # CORS must be explicitly configured for a deployed frontend. Local development
@@ -55,9 +77,8 @@ def health_check():
 
 @app.get("/ready")
 def readiness_check():
-    """Readiness check remains closed until tenant opt-out migration completes."""
-    if not get_leads_repo().suppression_registry_ready():
-        raise HTTPException(status_code=503, detail="Customer opt-out migration is incomplete")
+    """Readiness requires completed opt-out migration and an available HMAC key."""
+    get_leads_repo().suppression_registry_ready()
     return {"status": "ready"}
 
 
