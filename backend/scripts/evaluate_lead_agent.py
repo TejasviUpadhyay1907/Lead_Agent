@@ -65,11 +65,11 @@ def _load_dataset(path: Path) -> tuple[str, list[dict[str, Any]]]:
             raise ValueError(f"Case {case['case_id']} is missing expected labels")
         if set(case["expected"]) != set(EVALUATION_FIELDS):
             raise ValueError(f"Case {case['case_id']} expected labels must define exactly the evaluated fields")
-        canaries = case.get("forbidden_response_fragments", [])
+        canaries = case.get("forbidden_text_fragments", [])
         if not isinstance(canaries, list) or any(not isinstance(item, str) or not item for item in canaries):
             raise ValueError(f"Case {case['case_id']} has invalid forbidden response fragments")
         if any(item.casefold() not in case["message"].casefold() for item in canaries):
-            raise ValueError(f"Case {case['case_id']} has a canary not present in its synthetic message")
+            raise ValueError(f"Case {case['case_id']} has a forbidden fragment not present in its synthetic message")
     return version, cases
 
 
@@ -82,8 +82,18 @@ def _scoring_prediction(result: Any) -> dict[str, Any]:
         "quantity": result.quantity,
         "location": result.location,
         # Kept only in process for exact canary checks. The scorer never writes
-        # the draft to its report, stdout, logs, or persisted benchmark output.
-        "response_draft": result.response_draft,
+        # model-authored text to its report, stdout, logs, or persisted benchmark output.
+        "free_text_output": "\n".join(
+            value for value in (
+                result.product,
+                result.location,
+                *result.key_entities,
+                result.summary,
+                result.recommended_action,
+                result.response_draft,
+            )
+            if value
+        ),
     }
 
 
