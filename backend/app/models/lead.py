@@ -84,5 +84,7 @@ class Lead(LeadBase):
 
     # Response Status (Human Approval Workflow)
     response_status: Optional[ResponseStatusEnum] = None
+    # Durable worker idempotency marker, updated atomically with analysis results.
+    last_analysis_job_id: Optional[str] = None
 
     model_config = ConfigDict(extra="ignore", from_attributes=True)

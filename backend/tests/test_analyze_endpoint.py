@@ -4,6 +4,10 @@ LeadRescue AI — Integration Tests for POST /api/leads/{id}/analyze Endpoint
 
 from fastapi.testclient import TestClient
 from app.main import app
+from app.api.deps import get_audit_repo, get_config_repo, get_followups_repo, get_leads_repo
+from app.api.leads import analyze_lead_core
+from fastapi import HTTPException
+import pytest
 
 client = TestClient(app)
 
@@ -63,3 +67,74 @@ def test_analyze_lead_endpoint_integration():
 def test_analyze_nonexistent_lead():
     res = client.post("/api/leads/nonexistent-id-123/analyze")
     assert res.status_code == 404
+
+
+def test_opted_out_lead_is_blocked_before_sync_or_queued_analysis(monkeypatch):
+    created = client.post("/api/leads", json={
+        "customer_name": "Opted Out Analysis Contact",
+        "customer_email": "opted-out-analysis@example.com",
+        "source": "website",
+        "raw_message": "Please do not message me again.",
+    })
+    assert created.status_code == 201
+    lead_id = created.json()["lead_id"]
+    assert created.json()["lifecycle_status"] == "opted_out"
+
+    sync = client.post(f"/api/leads/{lead_id}/analyze")
+    queued = client.post(
+        f"/api/leads/{lead_id}/analysis-jobs",
+        headers={"Idempotency-Key": "optout-analysis-block-001"},
+    )
+
+    assert sync.status_code == 409
+    assert queued.status_code == 409
+    assert "opted out" in sync.json()["detail"].lower()
+    assert "opted out" in queued.json()["detail"].lower()
+
+    monkeypatch.setattr(
+        "app.api.leads.LeadRescueAgent.analyze_lead",
+        lambda *_args: pytest.fail("Opted-out inquiry must not be sent to the model"),
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        analyze_lead_core(
+            lead_id,
+            {"sub": "worker-test"},
+            get_leads_repo(),
+            get_followups_repo(),
+            get_audit_repo(),
+            get_config_repo(),
+            analysis_job_id="already-queued-job",
+        )
+    assert exc_info.value.status_code == 409
+
+
+def test_completed_analysis_job_redelivery_is_idempotent(monkeypatch):
+    created = client.post("/api/leads", json={
+        "customer_name": "Job Redelivery Contact",
+        "customer_email": "job-redelivery@example.com",
+        "source": "website",
+        "raw_message": "Please send product information.",
+    })
+    assert created.status_code == 201
+    lead_id = created.json()["lead_id"]
+    lead_repo = get_leads_repo()
+    lead = lead_repo.get_by_id(lead_id)
+    lead.last_analysis_job_id = "completed-job-identifier"
+    lead_repo.save(lead)
+
+    monkeypatch.setattr(
+        "app.api.leads.LeadRescueAgent.analyze_lead",
+        lambda *_args: pytest.fail("A completed job redelivery must not repeat inference"),
+    )
+    result = analyze_lead_core(
+        lead_id,
+        {"sub": "worker-test"},
+        lead_repo,
+        get_followups_repo(),
+        get_audit_repo(),
+        get_config_repo(),
+        analysis_job_id="completed-job-identifier",
+    )
+
+    assert result.lead_id == lead_id
+    assert result.last_analysis_job_id == "completed-job-identifier"
