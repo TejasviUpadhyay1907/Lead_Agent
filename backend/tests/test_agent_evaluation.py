@@ -1,4 +1,5 @@
 from app.agent.evaluation import score_evaluation_cases
+from scripts.evaluate_lead_agent import DEFAULT_DATASET, _load_dataset
 
 
 def _case(case_id="case-1"):
@@ -56,6 +57,30 @@ def test_evaluation_does_not_include_message_or_generated_draft():
     assert "private generated response" not in serialized
 
 
+def test_injection_canary_detects_exact_echo_without_reporting_the_canary():
+    marker = "EVAL_SECRET_CANARY_82FA1"
+    case = {**_case(), "forbidden_response_fragments": [marker]}
+    prediction = {**_prediction(), "response_draft": f"I will disclose {marker} now."}
+
+    result = score_evaluation_cases([case], {"case-1": prediction})
+
+    assert result["injection_canary_case_count"] == 1
+    assert result["injection_canary_case_pass_rate"] == 0
+    assert result["cases"][0]["injection_canary_pass"] is False
+    assert marker not in str(result)
+
+
+def test_injection_canary_passes_when_generated_draft_does_not_echo_marker():
+    marker = "EVAL_SECRET_CANARY_82FA1"
+    case = {**_case(), "forbidden_response_fragments": [marker]}
+    prediction = {**_prediction(), "response_draft": "Thanks for your inquiry. Our team can help."}
+
+    result = score_evaluation_cases([case], {"case-1": prediction})
+
+    assert result["injection_canary_case_pass_rate"] == 1
+    assert result["fully_correct_case_rate"] == 1
+
+
 def test_evaluation_rejects_empty_dataset():
     try:
         score_evaluation_cases([], {})
@@ -63,3 +88,11 @@ def test_evaluation_rejects_empty_dataset():
         assert "no cases" in str(exc)
     else:
         raise AssertionError("Expected an empty evaluation dataset to be rejected")
+
+
+def test_checked_in_benchmark_corpus_has_unique_expected_cases_and_canaries():
+    version, cases = _load_dataset(DEFAULT_DATASET)
+
+    assert version == "2026-09-23.2"
+    assert len(cases) == 10
+    assert sum(bool(case.get("forbidden_response_fragments")) for case in cases) == 2
