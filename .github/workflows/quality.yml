@@ -15,7 +15,7 @@ concurrency:
 jobs:
   frontend:
     name: Frontend production build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: frontend
@@ -31,7 +31,7 @@ jobs:
 
   backend-and-infrastructure:
     name: Backend and SAM validation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: backend
