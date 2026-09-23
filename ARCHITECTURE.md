@@ -117,7 +117,7 @@ Classification: 80–100=HOT, 50–79=WARM, 0–49=COLD
 | API Gateway | API entry point |
 | Lambda | Backend execution |
 | Bedrock | Foundation model inference |
-| DynamoDB | Leads, follow-ups, audit, config, and processed webhook events |
+| DynamoDB | Leads, follow-ups, audit, config, processed webhook events, customer suppressions, analysis jobs, and privacy requests |
 | Secrets Manager | HMAC secret for signed inbound source-system webhooks |
 | CloudWatch | Observability |
 | IAM | Least-privilege access |

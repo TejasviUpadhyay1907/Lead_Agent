@@ -246,13 +246,17 @@ class LeadsRepository:
             self._memory_store[lead.lead_id] = lead
             return lead
 
-    def create_with_audit(self, lead: Lead, audit: AuditEvent, audit_repo) -> Lead:
+    def create_with_audit(self, lead: Lead, audit: AuditEvent, audit_repo, privacy_request=None, privacy_repo=None) -> Lead:
         """Atomically persist a new production lead and its initial audit event."""
         if self.use_memory or not self._table:
             if not audit_repo.use_memory:
                 raise RuntimeError("Lead and audit records must use the same persistent storage mode")
+            if privacy_request and (not privacy_repo or not privacy_repo.use_memory):
+                raise RuntimeError("Lead and privacy request must use the same persistence mode")
             self._memory_store[lead.lead_id] = lead
             audit_repo.store(audit)
+            if privacy_request:
+                privacy_repo.create(privacy_request)
             if lead.lifecycle_status.value == "opted_out":
                 self._memory_suppressions.update(
                     key for key in suppression_keys(lead.tenant_id, lead.customer_email, lead.customer_phone) if key
@@ -260,6 +264,8 @@ class LeadsRepository:
             return lead
         if audit_repo.use_memory or not audit_repo._table:
             raise RuntimeError("Lead and audit records must use the same persistent storage mode")
+        if privacy_request and (not privacy_repo or privacy_repo.use_memory or not privacy_repo._table):
+            raise RuntimeError("Lead and privacy request must use the same persistent storage mode")
 
         self._table.meta.client.transact_write_items(
             TransactItems=[
@@ -277,6 +283,13 @@ class LeadsRepository:
                         "ConditionExpression": "attribute_not_exists(audit_id)",
                     }
                 },
+                *([{
+                    "Put": {
+                        "TableName": settings.privacy_requests_table,
+                        "Item": _serialize_item(privacy_request.model_dump(mode="json")),
+                        "ConditionExpression": "attribute_not_exists(request_id)",
+                    }
+                }] if privacy_request else []),
                 *self._suppression_transaction_items(lead),
             ]
         )
@@ -442,6 +455,71 @@ class LeadsRepository:
                     lead = Lead(**item)
                     found[lead.lead_id] = lead
         return sorted(found.values(), key=lambda lead: lead.created_at, reverse=True)[:limit]
+
+    def find_customer_history_page(
+        self,
+        *,
+        identifier_type: str,
+        customer_email: Optional[str] = None,
+        customer_phone: Optional[str] = None,
+        limit: int = 50,
+        cursor: Optional[str] = None,
+    ) -> tuple[List[Lead], Optional[str]]:
+        """Page all tenant-scoped records matching one verified contact identifier."""
+        if identifier_type not in {"email", "phone"}:
+            raise ValueError("Identifier type must be email or phone")
+        index_key_name = "tenant_email_key" if identifier_type == "email" else "tenant_phone_key"
+        index_name = "tenant-email-index" if identifier_type == "email" else "tenant-phone-index"
+        indexed = customer_index_keys(settings.effective_tenant_id, customer_email, customer_phone)
+        contact_key = indexed[index_key_name]
+        filters = {"tenant_id": settings.effective_tenant_id, "identifier_type": identifier_type, "contact_key": contact_key}
+        allowed_cursor_keys = {
+            "lead_id", "tenant_id", "created_at", "tenant_email_key", "tenant_phone_key", "lifecycle_status",
+        }
+        state = decode_cursor(cursor, filters, allowed_cursor_keys)
+        if not contact_key:
+            if cursor:
+                raise ValueError("Cursor does not match an available contact identifier")
+            return [], None
+
+        if self.use_memory or not self._table:
+            if identifier_type == "email":
+                candidates = [
+                    lead for lead in self._memory_store.values()
+                    if lead.tenant_id == settings.effective_tenant_id
+                    and customer_email and lead.customer_email
+                    and lead.customer_email.strip().lower() == customer_email.strip().lower()
+                ]
+            else:
+                normalize_phone = lambda value: "".join(filter(str.isdigit, value or ""))
+                target_phone = normalize_phone(customer_phone)
+                candidates = [
+                    lead for lead in self._memory_store.values()
+                    if lead.tenant_id == settings.effective_tenant_id
+                    and target_phone and normalize_phone(lead.customer_phone) == target_phone
+                ]
+            candidates.sort(key=lambda lead: (lead.created_at, lead.lead_id), reverse=True)
+            offset = state.get("offset", 0)
+            page = candidates[offset:offset + limit]
+            next_cursor = encode_cursor({"offset": offset + len(page), "filter": filters}) if offset + len(page) < len(candidates) else None
+            return page, next_cursor
+
+        query = {
+            "IndexName": index_name,
+            "KeyConditionExpression": Key(index_key_name).eq(contact_key),
+            "ScanIndexForward": False,
+            "Limit": limit,
+        }
+        if state.get("last_key"):
+            query["ExclusiveStartKey"] = state["last_key"]
+        response = self._table.query(**query)
+        page = [
+            Lead(**item) for item in response.get("Items", [])
+            if item.get("tenant_id") == settings.effective_tenant_id
+        ]
+        last_key = response.get("LastEvaluatedKey")
+        next_cursor = encode_cursor({"last_key": last_key, "filter": filters}) if last_key else None
+        return page, next_cursor
 
     def list_leads_page(
         self,

@@ -79,6 +79,31 @@ _NEGATED_PREFIXES = (
     "keep",
 )
 
+# These are intentionally narrower than opt-out language. A privacy request is
+# captured for human review; matching a phrase never implies that data was
+# exported, erased, or that a legal deadline has been satisfied.
+_PRIVACY_REQUEST_PHRASES = {
+    "erasure": (
+        "delete my data",
+        "please delete my data",
+        "erase my data",
+        "remove my personal data",
+        "delete my personal information",
+        "erase my personal information",
+        "delete my contact",
+        "please delete my contact",
+    ),
+    "access": (
+        "send me my data",
+        "i want a copy of my data",
+        "give me a copy of my data",
+        "provide a copy of my data",
+        "request access to my data",
+        "i want to access my personal data",
+        "show me my personal data",
+    ),
+}
+
 
 def _normalize_message(value: str) -> str:
     """Normalize Unicode punctuation/case/spacing for robust phrase matching."""
@@ -97,6 +122,21 @@ def _is_negated_match(message: str, phrase: str, start: int) -> bool:
         tokens = negated_prefix.split()
         if len(prefix) >= len(tokens) and prefix[-len(tokens):] == tokens:
             return True
+
+    # Questions about the process are not consent withdrawals or fulfillment
+    # requests. Apply this to both opt-out and privacy-request phrase matching.
+    normalized_prefix = " ".join(prefix[-6:])
+    informational_prefixes = (
+        "how do i",
+        "how can i",
+        "how could i",
+        "can you tell me how to",
+        "what is your",
+        "what is the",
+        "where can i read",
+    )
+    if any(normalized_prefix.endswith(start_phrase) for start_phrase in informational_prefixes):
+        return True
 
     # Common natural-language negation can put "stop" after an auxiliary.
     preceding = " ".join(prefix[-8:])
@@ -117,3 +157,23 @@ def check_opt_out(raw_message: str) -> Tuple[bool, str]:
         if match and not _is_negated_match(normalized, normalized_phrase, match.start()):
             return True, f"Matched opt-out phrase '{phrase}'"
     return False, "No opt-out phrases detected"
+
+
+def detect_privacy_request(raw_message: str) -> str | None:
+    """Return a conservative privacy-request category for explicit requests.
+
+    The result is suitable for a metadata-only audit marker. Do not use it as
+    proof of identity, legal classification, request completion, or deletion.
+    """
+    normalized = _normalize_message(raw_message or "")
+    for request_type, phrases in _PRIVACY_REQUEST_PHRASES.items():
+        for phrase in phrases:
+            normalized_phrase = _normalize_message(phrase)
+            match = re.search(
+                rf"(?<![a-z0-9]){re.escape(normalized_phrase)}(?![a-z0-9])",
+                normalized,
+            )
+            if not match or _is_negated_match(normalized, normalized_phrase, match.start()):
+                continue
+            return request_type
+    return None

@@ -7,13 +7,14 @@ import { LeadDetailView } from './views/LeadDetailView';
 import { FollowupsView } from './views/FollowupsView';
 import { ActivityView } from './views/ActivityView';
 import { SettingsView } from './views/SettingsView';
+import { PrivacyRequestsView } from './views/PrivacyRequestsView';
 import { ErrorState, Skeleton, Notice } from './components/Common/UI';
 import { api } from './api/client';
 import { followupBucket } from './api/presentation';
 import { useAuth } from './auth/AuthContext';
-import { demoMode } from './auth/oidc';
+import { demoMode, hasRole } from './auth/oidc';
 
-const paths = { dashboard: 'overview', inbox: 'leads', followups: 'followups', activity: 'activity', settings: 'settings' };
+const paths = { dashboard: 'overview', inbox: 'leads', followups: 'followups', activity: 'activity', settings: 'settings', privacy: 'privacy' };
 function readRoute() {
     const [path, id] = window.location.hash.replace(/^#\/?/, '').split('/');
     if (path === 'leads' && id) return { view: 'detail', leadId: id };
@@ -21,6 +22,7 @@ function readRoute() {
 }
 export default function App() {
     const auth = useAuth();
+    const adminAccess = demoMode || hasRole(import.meta.env.VITE_OIDC_ADMIN_ROLE || 'company_admin');
     const [route, setRoute] = useState(readRoute);
     const [menuOpen, setMenuOpen] = useState(false);
     const [data, setData] = useState({ leads: [], followups: [], config: null, clock: null });
@@ -67,7 +69,7 @@ export default function App() {
         return () => window.removeEventListener('hashchange', handler);
     }, []);
     useEffect(() => {
-        document.title = `${route.view === 'detail' ? 'Lead workspace' : ({dashboard:'Overview',inbox:'Leads',followups:'Follow-ups',activity:'Activity',settings:'Settings'})[route.view]} · LeadRescue AI`;
+        document.title = `${route.view === 'detail' ? 'Lead workspace' : ({dashboard:'Overview',inbox:'Leads',followups:'Follow-ups',activity:'Activity',settings:'Settings',privacy:'Privacy requests'})[route.view]} · LeadRescue AI`;
     }, [route.view]);
     useEffect(() => {
         if (!menuOpen) return;
@@ -102,7 +104,7 @@ export default function App() {
     const seedLeads = async () => { const result = await api.seedDemoLeads(); await refreshData(); return result; };
     const dueCount = data.clock && !errors.followups && !errors.leads ? data.followups.filter(f => ['due', 'overdue'].includes(followupBucket(f, data.leads.find(l => l.lead_id === f.lead_id), data.clock.effective_now))).length : null;
     const needsLeads = ['dashboard', 'inbox', 'followups', 'activity'].includes(route.view);
-    return <div className="app-layout"><a className="skip-link" href="#main-content" onClick={event => { event.preventDefault(); document.getElementById('main-content')?.focus(); }}>Skip to content</a><Sidebar currentView={route.view === 'detail' ? 'inbox' : route.view} setView={navigate} leadCount={loading || errors.leads ? null : data.leads.length} dueCount={dueCount} businessName={data.config?.business_name} open={menuOpen} onClose={() => setMenuOpen(false)} demoMode={demoMode} /><div className="main-wrapper" inert={menuOpen ? '' : undefined}><Navbar currentView={route.view} clock={data.clock} onMenu={() => setMenuOpen(true)} onRefreshData={refreshData} refreshing={refreshing} connected={!loading && !errors.leads} demoMode={demoMode} onSignOut={auth.signOut} /><main className="content-container" id="main-content" tabIndex={-1}>
+    return <div className="app-layout"><a className="skip-link" href="#main-content" onClick={event => { event.preventDefault(); document.getElementById('main-content')?.focus(); }}>Skip to content</a><Sidebar currentView={route.view === 'detail' ? 'inbox' : route.view} setView={navigate} leadCount={loading || errors.leads ? null : data.leads.length} dueCount={dueCount} businessName={data.config?.business_name} open={menuOpen} onClose={() => setMenuOpen(false)} demoMode={demoMode} adminAccess={adminAccess} /><div className="main-wrapper" inert={menuOpen ? '' : undefined}><Navbar currentView={route.view} clock={data.clock} onMenu={() => setMenuOpen(true)} onRefreshData={refreshData} refreshing={refreshing} connected={!loading && !errors.leads} demoMode={demoMode} onSignOut={auth.signOut} /><main className="content-container" id="main-content" tabIndex={-1}>
         {loading ? <Skeleton rows={6} label="Loading your operations workspace…" /> : needsLeads && errors.leads ? <ErrorState title="Your lead workspace is unavailable" description="We could not reach the lead API. No sample data has been substituted. Check that the API is available, then retry." onRetry={refreshData} /> : <>
             {route.view === 'dashboard' && <DashboardView leads={data.leads} followups={data.followups} onSelectLead={selectLead} onSeedData={demoMode ? seedLeads : undefined} demoMode={demoMode} onNavigate={navigate} now={data.clock?.effective_now} config={data.config} followupsError={errors.followups} onRetryFollowups={refreshData} />}
             {route.view === 'inbox' && <LeadInboxView leads={data.leads} followups={data.followups} onSelectLead={selectLead} onCreateLead={createLead} now={data.clock?.effective_now} initialFilter={inboxFilter} hasMore={Boolean(leadCursor)} loadingMore={loadingMore} onLoadMore={() => loadMore('leads')} loadMoreError={loadMoreError} />}
@@ -110,6 +112,7 @@ export default function App() {
             {route.view === 'followups' && <FollowupsView leads={data.leads} followups={data.followups} now={data.clock?.effective_now} onSelectLead={selectLead} onRefreshLeads={refreshData} error={errors.followups ? 'The follow-up API is unavailable. Retry to load the schedule.' : null} onRetry={refreshData} hasMore={Boolean(followupCursor)} loadingMore={loadingMore} onLoadMore={() => loadMore('followups')} loadMoreError={loadMoreError} />}
             {route.view === 'activity' && <ActivityView leads={data.leads} revision={revision} onSelectLead={selectLead} />}
             {route.view === 'settings' && <SettingsView onRefreshData={refreshData} clock={data.clock} demoMode={demoMode} />}
+            {route.view === 'privacy' && <PrivacyRequestsView onSelectLead={selectLead} />}
         </>}
         <footer className="page-footer"><span>LeadRescue AI <span className="footer-divider">/</span> Lead intelligence, human control.</span><span>{demoMode ? 'Synthetic workspace · All sends are simulated' : 'Company workspace · Message delivery is not connected'}</span></footer>
     </main></div></div>;

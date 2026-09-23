@@ -4,7 +4,7 @@ import { api } from '../../api/client';
 import { dateTime, timeOnly, safeError } from '../../api/presentation';
 import { Modal, Notice, BusyLabel } from '../Common/UI';
 
-const labels = { dashboard: 'Overview', inbox: 'Leads', detail: 'Lead workspace', followups: 'Follow-ups', activity: 'Activity', settings: 'Settings' };
+const labels = { dashboard: 'Overview', inbox: 'Leads', detail: 'Lead workspace', followups: 'Follow-ups', activity: 'Activity', settings: 'Settings', privacy: 'Privacy requests' };
 export function Navbar({ currentView, onRefreshData, onMenu, clock, connected, refreshing, demoMode = false, onSignOut }) {
     const [showClock, setShowClock] = useState(false);
     const [action, setAction] = useState(null);

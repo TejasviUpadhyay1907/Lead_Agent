@@ -107,6 +107,20 @@ export function getAccessToken() {
     return accessToken && Date.now() < expiresAt ? accessToken : null;
 }
 
+// This is only a navigation hint. Every protected action is still authorized
+// by the API after cryptographic token validation.
+export function hasRole(role) {
+    const token = getAccessToken();
+    if (!token || !role) return false;
+    try {
+        const claims = decodeJwtPayload(token);
+        const roles = claims.roles ?? claims['cognito:groups'] ?? [];
+        return (Array.isArray(roles) ? roles : [roles]).includes(role);
+    } catch {
+        return false;
+    }
+}
+
 export function clearAccessToken() {
     accessToken = null;
     idToken = null;

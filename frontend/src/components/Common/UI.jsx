@@ -21,7 +21,7 @@ export function ErrorState({ title = 'Unable to load this view', description = '
     return <div className="error-state" role="alert"><AlertCircle size={20} /><div><strong>{title}</strong><p>{description}</p></div>{onRetry && <button className="btn-secondary btn-sm" onClick={onRetry}>Try again</button>}</div>;
 }
 export function Notice({ children, tone = 'success' }) {
-    const Icon = tone === 'error' ? AlertCircle : CheckCircle2;
+    const Icon = tone === 'error' || tone === 'warning' ? AlertCircle : CheckCircle2;
     return <div className={`notice ${tone}`} role={tone === 'error' ? 'alert' : 'status'}><Icon size={18} /><div>{children}</div></div>;
 }
 export function Skeleton({ rows = 4, label = 'Loading workspace…' }) {

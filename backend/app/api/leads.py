@@ -12,22 +12,24 @@ import boto3
 from pydantic import BaseModel, Field
 
 from app.agent.lead_agent import LeadRescueAgent
-from app.api.deps import get_audit_repo, get_config_repo, get_followups_repo, get_leads_repo
+from app.api.deps import get_audit_repo, get_config_repo, get_followups_repo, get_leads_repo, get_privacy_requests_repo
 from app.api.security import require_roles
 from app.config.settings import settings
 from app.models.audit import AuditEventCreate
 from app.models.enums import FollowUpStatusEnum, LifecycleStatusEnum, PriorityEnum, ResponseStatusEnum, RiskStatusEnum, SourceEnum
 from app.models.followup import FollowUp, FollowUpCreate
 from app.models.lead import Lead, LeadCreate
+from app.models.privacy_request import PrivacyRequest
 from app.policy.engine import PolicyEngine
 from app.policy.risk import evaluate_risk
 from app.repositories.audit import AuditRepository
 from app.repositories.config import ConfigRepository
 from app.repositories.followups import FollowUpsRepository
 from app.repositories.leads import ConcurrentLeadUpdateError, LeadsRepository
+from app.repositories.privacy_requests import PrivacyRequestsRepository
 from app.repositories.analysis_jobs import repository as analysis_jobs_repo
 from app.utils.time import effective_now
-from app.policy.guardrails import check_opt_out
+from app.policy.guardrails import check_opt_out, detect_privacy_request
 
 router = APIRouter(prefix="/leads", tags=["Leads"])
 
@@ -59,14 +61,22 @@ def create_lead(
     _operator=Depends(require_roles(settings.operator_role, settings.admin_role)),
     leads_repo: LeadsRepository = Depends(get_leads_repo),
     audit_repo: AuditRepository = Depends(get_audit_repo),
+    privacy_repo: PrivacyRequestsRepository = Depends(get_privacy_requests_repo),
 ):
     """
     Create a new incoming lead.
     Creates lead record and logs an audit event.
     """
     lead = Lead(**lead_in.model_dump())
+    privacy_request = detect_privacy_request(lead_in.raw_message)
+    privacy_record = PrivacyRequest(
+        lead_id=lead.lead_id,
+        request_type=privacy_request,
+        source="manual",
+    ) if privacy_request else None
+    lead.privacy_hold = bool(privacy_request)
     opted_out_in_message, _ = check_opt_out(lead_in.raw_message)
-    if opted_out_in_message or leads_repo.customer_opted_out(lead):
+    if opted_out_in_message or privacy_request == "erasure" or leads_repo.customer_opted_out(lead):
         lead.lifecycle_status = LifecycleStatusEnum.OPTED_OUT
 
     audit = audit_repo.build(
@@ -77,10 +87,16 @@ def create_lead(
             details={
                 "source": lead.source.value,
                 "lifecycle_status": lead.lifecycle_status.value,
+                **({
+                    "privacy_request_type": privacy_request,
+                    "privacy_request_status": "pending_admin_review",
+                    "privacy_request_id": privacy_record.request_id,
+                    "admin_action_required": True,
+                } if privacy_request else {}),
             },
         )
     )
-    lead = leads_repo.create_with_audit(lead, audit, audit_repo)
+    lead = leads_repo.create_with_audit(lead, audit, audit_repo, privacy_record, privacy_repo)
 
     return lead
 
@@ -188,6 +204,8 @@ def analyze_lead_core(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Lead with ID '{lead_id}' not found",
         )
+    if lead.privacy_hold:
+        raise HTTPException(status_code=409, detail="Lead processing is paused while a privacy request is reviewed")
     if analysis_job_id and lead.last_analysis_job_id == analysis_job_id:
         return lead
     if leads_repo.customer_opted_out(lead):
@@ -307,6 +325,8 @@ def create_analysis_job(
     lead = leads_repo.get_by_id(lead_id)
     if not lead:
         raise HTTPException(status_code=404, detail=f"Lead with ID '{lead_id}' not found")
+    if lead.privacy_hold:
+        raise HTTPException(status_code=409, detail="Lead processing is paused while a privacy request is reviewed")
     if leads_repo.customer_opted_out(lead):
         raise HTTPException(status_code=409, detail="Customer has opted out for this contact")
     if not settings.analysis_queue_url:
@@ -382,6 +402,8 @@ def process_response_action(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid action '{req.action}'. Supported actions: approve, edit, reject.",
         )
+    if lead.privacy_hold:
+        raise HTTPException(status_code=409, detail="Response actions are paused while a privacy request is reviewed")
     expected_updated_at = lead.updated_at
 
     def commit_action(*audit_events: AuditEventCreate) -> Lead:
@@ -533,6 +555,16 @@ def rescue_lead(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Lead with ID '{lead_id}' not found",
         )
+    if lead.privacy_hold:
+        audit_repo.create(
+            AuditEventCreate(
+                lead_id=lead_id,
+                action="rescue_blocked",
+                actor=f"user:{_operator['sub']}",
+                details={"reason": "privacy_request_pending"},
+            )
+        )
+        return {"rescued": False, "reason": "privacy_request_pending"}
     if leads_repo.customer_opted_out(lead):
         lead.lifecycle_status = LifecycleStatusEnum.OPTED_OUT
     expected_updated_at = lead.updated_at

@@ -1,6 +1,6 @@
 /** Presentation helpers only. Scores, risk, priorities and eligibility remain API-owned. */
 export const humanize = value => value == null || value === '' ? 'Not available' : String(value).replace(/[_-]/g, ' ').replace(/\b\w/g, char => char.toUpperCase());
-export const isBlocked = lead => ['opted_out', 'resolved'].includes(lead?.lifecycle_status);
+export const isBlocked = lead => Boolean(lead?.privacy_hold) || ['opted_out', 'resolved'].includes(lead?.lifecycle_status);
 export const isOptedOut = lead => lead?.lifecycle_status === 'opted_out';
 export const isPendingResponse = lead => !isBlocked(lead) && ['draft', 'edited'].includes(lead?.response_status);
 export const isAwaitingDelivery = lead => !isBlocked(lead) && ['approved', 'simulated_sent'].includes(lead?.response_status);

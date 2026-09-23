@@ -65,7 +65,7 @@ React/Vite → S3+CloudFront → API Gateway → Lambda+FastAPI
 | Backend | Python 3.12 + FastAPI + Mangum |
 | Agent | Strands Agents SDK |
 | LLM | Amazon Bedrock (configurable model) |
-| Database | DynamoDB (5 tables, including webhook deduplication) |
+| Database | DynamoDB (8 tables, including privacy requests, durable jobs, suppressions, and webhook deduplication) |
 | Hosting | S3 + CloudFront |
 | API | API Gateway + Lambda |
 | IaC | AWS SAM |
@@ -77,7 +77,7 @@ React/Vite → S3+CloudFront → API Gateway → Lambda+FastAPI
 |---|---|
 | Lambda | Backend compute |
 | API Gateway | REST API |
-| DynamoDB | Lead, follow-up, audit, config storage |
+| DynamoDB | Lead, follow-up, audit, config, webhook idempotency, customer suppression, analysis jobs, and privacy request storage |
 | Bedrock | Foundation model inference |
 | Secrets Manager | Inbound webhook HMAC secret |
 | S3 | Frontend hosting |
@@ -163,7 +163,7 @@ The first inbound integration adapter is a signed webhook for CRMs and form syst
 
 Lead analysis in the browser uses the durable job endpoint (`POST /api/leads/{lead_id}/analysis-jobs`, with an `Idempotency-Key` header) and polls `GET /api/leads/analysis-jobs/{job_id}`. SQS retries failed worker deliveries and sends exhausted/crashed jobs to a dead-letter queue; the required alarm topic receives worker errors/throttles, queue delay, and dead-letter alarms. The older `POST /api/leads/{lead_id}/analyze` endpoint remains synchronous for compatibility; new integrations should use the job flow.
 
-Company admins can download one lead record and its linked follow-ups and complete audit history from the lead detail page (`GET /api/privacy/leads/{lead_id}/export`). The export is tenant-scoped, marked no-store, and creates an audit event. This is a per-lead operational export; it does not locate every record for a person or replace a formal subject-access/deletion workflow.
+Company admins can download one lead record and its linked follow-ups and complete audit history from the lead detail page (`GET /api/privacy/leads/{lead_id}/export`). The export is tenant-scoped, marked no-store, and creates an audit event. Explicitly detected English access/erasure requests from manual and signed-webhook intake are recorded in a separate tenant-scoped admin queue and linked to the lead audit timeline. These requests pause AI analysis, response actions, and rescue for that lead record; a future sales inquiry should arrive as a new lead. Erasure requests also suppress future outreach to the matched contact. After an administrator marks identity verified, the queue can page candidate lead records matching the request lead's stored email or normalized phone; results omit contact details and message text, and each lookup is audited. The lookup does not cover changed or missing identifiers, unrelated connected systems, or guarantee a complete person-wide inventory. Admin status transitions are audited and conditional; recording completion is an administrator attestation only. The product does not automatically verify identity or fulfill a subject-wide export/erasure. Follow the customer's approved privacy process and do not treat queue closure as legal-compliance proof.
 
 Opt-outs apply to the contact across future leads matched by normalized email or phone. Before enabling this release on an existing deployment, pause API intake/outreach and the analysis worker event source. Run `python backend/scripts/backfill_customer_suppressions.py --leads-table leadrescue-leads --suppressions-table leadrescue-customer-suppressions --tenant-id <tenant> --region <region> --index-secret-arn <customer-index-secret-arn>` as a dry run, review the count, then repeat with `--apply` using a separate migration identity with scoped DynamoDB scan/write/delete and `secretsmanager:GetSecretValue` access to the exact index-key secret. Applying removes the prior readiness marker first, so an interrupted migration stays fail-closed. The API, webhook, and worker require both migration completion markers to match the active HMAC key; `/ready` stays `503` until customer-history indexes and opt-out markers are backfilled with that key. Resume intake and the worker only after both apply commands complete and `/ready` returns `200`. New opt-outs and state-changing workflows update the suppression registry transactionally. The registry is durable and has no TTL; removing an opt-out requires verified consent and a separately controlled process that is not yet implemented.
 

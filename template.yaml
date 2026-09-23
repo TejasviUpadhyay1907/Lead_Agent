@@ -160,6 +160,7 @@ Resources:
           PROCESSED_EVENTS_TABLE: !Ref ProcessedEventsTable
           CUSTOMER_SUPPRESSIONS_TABLE: !Ref CustomerSuppressionsTable
           ANALYSIS_JOBS_TABLE: !Ref AnalysisJobsTable
+          PRIVACY_REQUESTS_TABLE: !Ref PrivacyRequestsTable
           ANALYSIS_QUEUE_URL: !Ref AnalysisJobsQueue
           WEBHOOK_SECRET_ARN: !Ref WebhookSecretArn
           CUSTOMER_INDEX_SECRET_ARN: !Ref CustomerIndexSecretArn
@@ -197,6 +198,11 @@ Resources:
               Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem]
               Resource: !GetAtt AnalysisJobsTable.Arn
             - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:Query]
+              Resource:
+                - !GetAtt PrivacyRequestsTable.Arn
+                - !Sub "${PrivacyRequestsTable.Arn}/index/*"
+            - Effect: Allow
               Action: [dynamodb:GetItem, dynamodb:BatchGetItem]
               Resource: !GetAtt CustomerSuppressionsTable.Arn
             - Effect: Allow
@@ -230,6 +236,7 @@ Resources:
                 - !GetAtt ConfigTable.Arn
                 - !GetAtt ProcessedEventsTable.Arn
                 - !GetAtt CustomerSuppressionsTable.Arn
+                - !GetAtt PrivacyRequestsTable.Arn
         - Statement:
             - Effect: Allow
               Action:
@@ -675,6 +682,53 @@ Resources:
       KeySchema:
         - AttributeName: job_id
           KeyType: HASH
+
+  PrivacyRequestsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: leadrescue-privacy-requests
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: request_id
+          AttributeType: S
+        - AttributeName: tenant_id
+          AttributeType: S
+        - AttributeName: tenant_status
+          AttributeType: S
+        - AttributeName: tenant_queue
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: request_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: tenant-created-index
+          KeySchema:
+            - AttributeName: tenant_id
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: tenant-status-created-index
+          KeySchema:
+            - AttributeName: tenant_status
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: tenant-queue-created-index
+          KeySchema:
+            - AttributeName: tenant_queue
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
 
 Outputs:
   ApiEndpoint:

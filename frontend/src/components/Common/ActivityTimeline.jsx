@@ -37,6 +37,11 @@ const DETAIL_WHITELIST = new Set([
     'target_minutes',
     'rule',
     'trigger',
+    'privacy_request_type',
+    'privacy_request_status',
+    'privacy_request_id',
+    'request_type',
+    'admin_action_required',
 ]);
 
 const SENSITIVE_KEY = /(secret|token|password|passwd|credential|api[_-]?key|private|auth|prompt|payload|raw|customer_email|customer_phone|phone|email|address|contact)/i;

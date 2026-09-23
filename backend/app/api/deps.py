@@ -7,12 +7,14 @@ from app.repositories.audit import AuditRepository
 from app.repositories.config import ConfigRepository
 from app.repositories.followups import FollowUpsRepository
 from app.repositories.leads import LeadsRepository
+from app.repositories.privacy_requests import PrivacyRequestsRepository
 
 # Singleton repository instances
 _leads_repo = LeadsRepository()
 _followups_repo = FollowUpsRepository()
 _audit_repo = AuditRepository()
 _config_repo = ConfigRepository()
+_privacy_requests_repo = PrivacyRequestsRepository()
 
 
 def get_leads_repo() -> LeadsRepository:
@@ -29,3 +31,7 @@ def get_audit_repo() -> AuditRepository:
 
 def get_config_repo() -> ConfigRepository:
     return _config_repo
+
+
+def get_privacy_requests_repo() -> PrivacyRequestsRepository:
+    return _privacy_requests_repo

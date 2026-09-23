@@ -177,7 +177,9 @@ export function FollowupsView({ followups, leads, onSelectLead, onRefreshLeads, 
                             const canOpen = Boolean(onSelectLead && followup.lead_id);
                             const reason = !leadKnown
                                 ? 'Lead record not loaded — action unavailable'
-                                : isBlocked(lead)
+                                : lead?.privacy_hold
+                                    ? 'Privacy request safeguard — outreach blocked for this record'
+                                    : isBlocked(lead)
                                     ? `Lead is ${humanize(lifecyclePresentationStatus(lead)).toLowerCase()} — outreach blocked`
                                     : null;
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Search, Plus, ChevronRight, ChevronLeft, Eye, Inbox } from 'lucide-react';
+import { Search, Plus, ChevronRight, ChevronLeft, Eye, Inbox, ShieldAlert } from 'lucide-react';
 import { PriorityBadge, RiskBadge, LifecycleBadge } from '../components/Common/Badge';
 import { PageHeader, EmptyState, Notice, BusyLabel, Avatar, Modal } from '../components/Common/UI';
 import { humanize, isPendingResponse, isOptedOut, lifecyclePresentationStatus, relativeDue, timeOnly, safeError } from '../api/presentation';
@@ -19,6 +19,7 @@ const TABS = [
     { id: 'all', label: 'All' },
     { id: 'at_risk', label: 'At risk' },
     { id: 'pending', label: 'Pending approval' },
+    { id: 'privacy', label: 'Privacy hold' },
     { id: 'opted_out', label: 'Opted out' },
 ];
 
@@ -68,6 +69,7 @@ function StatusCell({ lead }) {
         <div className="cell-status">
             <RiskBadge risk={lead.risk_status} />
             <LifecycleBadge status={lifecyclePresentationStatus(lead)} />
+            {lead.privacy_hold && <span className="badge-sub privacy-hold-label"><ShieldAlert size={12} /> Privacy hold</span>}
         </div>
     );
 }
@@ -106,6 +108,7 @@ export function LeadInboxView({ leads = [], followups, onSelectLead, onCreateLea
         all: leads.length,
         at_risk: leads.filter(lead => normalize(lead.risk_status) === 'at_risk').length,
         pending: leads.filter(isPendingResponse).length,
+        privacy: leads.filter(lead => lead.privacy_hold).length,
         opted_out: leads.filter(isOptedOut).length,
     }), [leads]);
 
@@ -126,6 +129,7 @@ export function LeadInboxView({ leads = [], followups, onSelectLead, onCreateLea
     const filtered = useMemo(() => leads.filter(lead => {
         if (tab === 'at_risk' && normalize(lead.risk_status) !== 'at_risk') return false;
         if (tab === 'pending' && !isPendingResponse(lead)) return false;
+        if (tab === 'privacy' && !lead.privacy_hold) return false;
         if (tab === 'opted_out' && !isOptedOut(lead)) return false;
         if (priorityFilter !== 'all' && normalize(lead.priority) !== priorityFilter) return false;
         if (sourceFilter !== 'all' && normalize(lead.source) !== sourceFilter) return false;

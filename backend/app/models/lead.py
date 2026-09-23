@@ -80,6 +80,8 @@ class Lead(LeadBase):
     # Status Concepts (Orthogonal)
     lifecycle_status: LifecycleStatusEnum = LifecycleStatusEnum.NEW
     risk_status: RiskStatusEnum = RiskStatusEnum.NORMAL
+    # Privacy requests pause AI and sales workflows for this individual record.
+    privacy_hold: bool = False
     at_risk_at: Optional[str] = None
 
     # Response Status (Human Approval Workflow)

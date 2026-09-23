@@ -1,10 +1,11 @@
 import React from 'react';
-import { LayoutDashboard, Inbox, CalendarClock, Settings2, Activity, ArrowUpRight, ShieldCheck, LifeBuoy, X, ChevronDown } from 'lucide-react';
+import { LayoutDashboard, Inbox, CalendarClock, Settings2, Activity, ArrowUpRight, ShieldCheck, ShieldAlert, LifeBuoy, X, ChevronDown } from 'lucide-react';
 
-export function Sidebar({ currentView, setView, leadCount, dueCount, open, onClose, businessName, demoMode = false }) {
+export function Sidebar({ currentView, setView, leadCount, dueCount, open, onClose, businessName, demoMode = false, adminAccess = false }) {
     const items = [
         ['dashboard', 'Overview', LayoutDashboard], ['inbox', 'Leads', Inbox, leadCount],
         ['followups', 'Follow-ups', CalendarClock, dueCount], ['activity', 'Activity', Activity], ['settings', 'Settings', Settings2],
+        ...(adminAccess ? [['privacy', 'Privacy requests', ShieldAlert]] : []),
     ];
     return <>
         {open && <button className="sidebar-backdrop" aria-label="Close navigation" onClick={onClose} />}

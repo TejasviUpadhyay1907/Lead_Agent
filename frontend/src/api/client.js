@@ -73,6 +73,24 @@ export const api = {
         window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
     },
 
+    getPrivacyRequestsPage: (params = {}) => {
+        const query = new URLSearchParams({ limit: '50' });
+        if (params.cursor) query.set('cursor', params.cursor);
+        if (params.status) query.set('status', params.status);
+        return request(`/privacy/requests?${query}`, {}, true);
+    },
+
+    getPrivacyRequestRecordsPage: (id, params = {}) => {
+        const query = new URLSearchParams({ match: params.match, limit: String(params.limit || 50) });
+        if (params.cursor) query.set('cursor', params.cursor);
+        return request(`/privacy/requests/${encodeURIComponent(id)}/records?${query}`, {}, true);
+    },
+
+    updatePrivacyRequestStatus: (id, status, resolutionCode) => request(`/privacy/requests/${encodeURIComponent(id)}/status`, {
+        method: 'PUT',
+        body: JSON.stringify({ status, resolution_code: resolutionCode || null }),
+    }),
+
     createLead: (leadData) => request('/leads', {
         method: 'POST',
         body: JSON.stringify(leadData),

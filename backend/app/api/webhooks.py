@@ -22,6 +22,7 @@ from app.config.settings import settings
 from app.models.audit import AuditEvent
 from app.models.enums import LifecycleStatusEnum, SourceEnum
 from app.models.lead import Lead
+from app.models.privacy_request import PrivacyRequest
 from app.repositories.base import get_boto3_dynamodb_resource
 from app.repositories.customer_index import customer_index_keys
 from app.repositories.customer_suppressions import (
@@ -31,7 +32,7 @@ from app.repositories.customer_suppressions import (
     suppression_keys,
 )
 from app.repositories.customer_index import require_customer_index_key
-from app.policy.guardrails import check_opt_out
+from app.policy.guardrails import check_opt_out, detect_privacy_request
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/integrations/v1", tags=["Integrations"])
@@ -157,6 +158,7 @@ def _create_or_return_duplicate(
     provider: str,
     idempotency_digest: str,
     payload_digest: str,
+    privacy_request: Optional[PrivacyRequest] = None,
 ) -> JSONResponse:
     dynamodb = get_boto3_dynamodb_resource()
     if not dynamodb:
@@ -219,6 +221,13 @@ def _create_or_return_duplicate(
                         "ConditionExpression": "attribute_not_exists(audit_id)",
                     }
                 },
+                *([{
+                    "Put": {
+                        "TableName": settings.privacy_requests_table,
+                        "Item": _serialize(privacy_request.model_dump(mode="json")),
+                        "ConditionExpression": "attribute_not_exists(request_id)",
+                    }
+                }] if privacy_request else []),
                 {
                     "Put": {
                         "TableName": settings.processed_events_table,
@@ -286,8 +295,15 @@ async def ingest_lead(
         source=payload.source,
         raw_message=payload.message,
     )
+    privacy_request = detect_privacy_request(payload.message)
+    privacy_record = PrivacyRequest(
+        lead_id=lead.lead_id,
+        request_type=privacy_request,
+        source=f"integration:{provider}",
+    ) if privacy_request else None
+    lead.privacy_hold = bool(privacy_request)
     opted_out, _ = check_opt_out(payload.message)
-    if opted_out:
+    if opted_out or privacy_request == "erasure":
         lead.lifecycle_status = LifecycleStatusEnum.OPTED_OUT
 
     audit = AuditEvent(
@@ -296,7 +312,17 @@ async def ingest_lead(
         tenant_lead_id=f"{settings.effective_tenant_id}#{lead.lead_id}",
         action="lead_received",
         actor=f"integration:{provider}",
-        details={"source": payload.source.value, "event_digest": idempotency_digest, "lifecycle_status": lead.lifecycle_status.value},
+        details={
+            "source": payload.source.value,
+            "event_digest": idempotency_digest,
+            "lifecycle_status": lead.lifecycle_status.value,
+            **({
+                "privacy_request_type": privacy_request,
+                "privacy_request_status": "pending_admin_review",
+                "privacy_request_id": privacy_record.request_id,
+                "admin_action_required": True,
+            } if privacy_request else {}),
+        },
     )
     return await run_in_threadpool(
         _create_or_return_duplicate,
@@ -306,4 +332,5 @@ async def ingest_lead(
         provider,
         idempotency_digest,
         payload_digest,
+        privacy_record,
     )

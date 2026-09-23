@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     processed_events_table: str = "leadrescue-processed-events"
     customer_suppressions_table: str = "leadrescue-customer-suppressions"
     analysis_jobs_table: str = "leadrescue-analysis-jobs"
+    privacy_requests_table: str = "leadrescue-privacy-requests"
     analysis_queue_url: str = ""
     analysis_dlq_arn: str = ""
     webhook_secret_arn: str = ""

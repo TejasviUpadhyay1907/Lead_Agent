@@ -126,9 +126,10 @@ def test_ingest_verifies_and_maps_valid_request(monkeypatch):
     def record_verification(raw, timestamp, provider, event_id, signature):
         verified.update(body=raw, timestamp=timestamp, provider=provider, event_id=event_id, signature=signature)
 
-    def record_persistence(lead, audit, event_key, provider, idempotency_digest, payload_digest):
+    def record_persistence(lead, audit, event_key, provider, idempotency_digest, payload_digest, privacy_request=None):
         persisted.update(lead=lead, audit=audit, event_key=event_key, provider=provider,
-                         idempotency_digest=idempotency_digest, payload_digest=payload_digest)
+                         idempotency_digest=idempotency_digest, payload_digest=payload_digest,
+                         privacy_request=privacy_request)
         return webhooks.JSONResponse(status_code=201, content={"accepted": True, "duplicate": False, "lead_id": lead.lead_id})
 
     monkeypatch.setattr(webhooks, "_verify_signature", record_verification)
@@ -147,6 +148,7 @@ def test_ingest_verifies_and_maps_valid_request(monkeypatch):
     assert persisted["lead"].raw_message == "Need a quote for 20 units."
     assert persisted["audit"].tenant_id == persisted["lead"].tenant_id
     assert persisted["payload_digest"] == hashlib.sha256(body).hexdigest()
+    assert persisted["privacy_request"] is None
 
 
 class _FakeTable:
