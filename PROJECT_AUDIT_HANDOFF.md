@@ -5,7 +5,7 @@
 **Product:** LeadRescue AI  
 **Audience:** A new engineering/product chat continuing the industrial-readiness goal
 
-> **Current-state note:** This handoff preserves an earlier audit snapshot and its repository/test details are historical. Use [CURRENT_AUDIT_2026-09-23.md](CURRENT_AUDIT_2026-09-23.md) as the source of truth for the current commit, worktree, synthetic agent benchmark, latest local test result, and remaining release gates. Refresh the live GitHub ref before publication because remote access was unavailable during that audit.
+> **Current-state note:** This handoff preserves an earlier audit snapshot and its repository/test details are historical. Use [CURRENT_AUDIT_2026-09-23.md](CURRENT_AUDIT_2026-09-23.md) as the source of truth for current commits, worktree, synthetic agent benchmark, opt-out guardrails, latest local test result, and remaining release gates. The 2026-09-24 continuation verified published `main` through commit `4e6063a` and passing CI; still refresh live GitHub state before further edits.
 
 ## Executive assessment
 
