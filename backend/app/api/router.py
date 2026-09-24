@@ -13,6 +13,7 @@ from app.api.demo import router as demo_router
 from app.api.followups import router as followups_router
 from app.api.leads import router as leads_router
 from app.api.privacy import router as privacy_router
+from app.api.reports import router as reports_router
 
 api_router = APIRouter(prefix="/api", dependencies=[Depends(require_authenticated_user)])
 
@@ -28,3 +29,4 @@ api_router.include_router(audit_router)
 api_router.include_router(config_router)
 api_router.include_router(demo_router)
 api_router.include_router(privacy_router)
+api_router.include_router(reports_router)

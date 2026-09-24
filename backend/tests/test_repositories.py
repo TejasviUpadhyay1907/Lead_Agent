@@ -79,6 +79,33 @@ def test_sales_value_is_serialized_as_exact_dynamodb_number():
     assert encoded["sales_value"]["N"] == "125000.50"
 
 
+def test_outcome_report_pages_complete_date_cohorts_and_keep_currencies_separate():
+    repo = LeadsRepository(use_memory=True)
+    cohort = [
+        Lead(customer_name="Won One", source=SourceEnum.WEBSITE, raw_message="quote", created_at="2026-01-02T12:00:00+00:00", sales_outcome=SalesOutcomeEnum.WON, sales_value=Decimal("100.25"), sales_currency="INR"),
+        Lead(customer_name="Won Two", source=SourceEnum.WEBSITE, raw_message="quote", created_at="2026-01-03T12:00:00+00:00", sales_outcome=SalesOutcomeEnum.WON, sales_value=Decimal("9.75"), sales_currency="USD"),
+        Lead(customer_name="Lost", source=SourceEnum.WEBSITE, raw_message="quote", created_at="2026-01-04T12:00:00+00:00", sales_outcome=SalesOutcomeEnum.LOST),
+        Lead(customer_name="Open", source=SourceEnum.WEBSITE, raw_message="quote", created_at="2026-01-05T12:00:00+00:00"),
+        Lead(customer_name="Outside", source=SourceEnum.WEBSITE, raw_message="quote", created_at="2026-02-01T12:00:00+00:00", sales_outcome=SalesOutcomeEnum.WON, sales_value=Decimal("999"), sales_currency="INR"),
+        Lead(customer_name="Other tenant", source=SourceEnum.WEBSITE, raw_message="quote", created_at="2026-01-06T12:00:00+00:00", tenant_id="other-tenant", sales_outcome=SalesOutcomeEnum.WON, sales_value=Decimal("500"), sales_currency="INR"),
+    ]
+    repo._memory_store = {lead.lead_id: lead for lead in cohort}
+
+    first = repo.outcome_report_page("2026-01-01T00:00:00+00:00", "2026-01-31T23:59:59+00:00", limit=2)
+    second = repo.outcome_report_page(
+        "2026-01-01T00:00:00+00:00", "2026-01-31T23:59:59+00:00", cursor=first["next_cursor"], limit=2,
+    )
+
+    assert first["counts"] == {"total": 2, "won": 2, "lost": 0, "disqualified": 0, "open": 0}
+    assert first["won_value_by_currency"] == {"INR": "100.25", "USD": "9.75"}
+    assert second["counts"] == {"total": 2, "won": 0, "lost": 1, "disqualified": 0, "open": 1}
+    assert second["won_value_by_currency"] == {}
+    assert second["next_cursor"] is None
+
+    with pytest.raises(ValueError, match="does not match"):
+        repo.outcome_report_page("2026-01-02T00:00:00+00:00", "2026-01-31T23:59:59+00:00", cursor=first["next_cursor"], limit=2)
+
+
 def test_followups_repo_crud(followups_repo):
     fup_in = FollowUpCreate(
         lead_id="lead-123",

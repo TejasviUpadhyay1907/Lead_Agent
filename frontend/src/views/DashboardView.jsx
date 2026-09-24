@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { PriorityBadge, RiskBadge } from '../components/Common/Badge';
 import { StatCard } from '../components/Common/StatCard';
+import { OutcomeReport } from '../components/Common/OutcomeReport';
 import {
     PageHeader, SectionHeader, WorkflowStrip, EmptyState, ErrorState, Notice, BusyLabel, Avatar,
 } from '../components/Common/UI';
@@ -126,6 +127,8 @@ export function DashboardView({
             </PageHeader>
 
             <WorkflowStrip />
+
+            <OutcomeReport />
 
             {seedError && <Notice tone="error">{seedError}</Notice>}
 

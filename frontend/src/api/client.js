@@ -169,6 +169,12 @@ export const api = {
         body: JSON.stringify(outcome),
     }),
 
+    getOutcomeReportPage: (startDate, endDate, cursor) => {
+        const query = new URLSearchParams({ start_date: startDate, end_date: endDate });
+        if (cursor) query.set('cursor', cursor);
+        return request(`/reports/outcomes?${query}`);
+    },
+
     // Follow-ups
     getFollowupsPage: (params = {}) => {
         const query = new URLSearchParams({ limit: '50' });

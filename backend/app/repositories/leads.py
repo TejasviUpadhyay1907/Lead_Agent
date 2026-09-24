@@ -4,6 +4,7 @@ Provides persistence operations for Lead records (DynamoDB & Memory fallback).
 """
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 import time
 from typing import Dict, List, Optional, Sequence
 from botocore.exceptions import ClientError
@@ -587,6 +588,72 @@ class LeadsRepository:
         last_key = response.get("LastEvaluatedKey")
         next_cursor = encode_cursor({"last_key": last_key, "filter": filters}) if last_key else None
         return page, next_cursor
+
+    def outcome_report_page(self, start_at: str, end_at: str, cursor: Optional[str] = None, limit: int = 100) -> dict:
+        """Aggregate one complete, tenant-scoped lead-created cohort page.
+
+        The GSI is eventually consistent; callers must keep that qualification
+        visible and follow every cursor before presenting the cohort total.
+        """
+        filters = {"tenant_id": settings.effective_tenant_id, "start_at": start_at, "end_at": end_at}
+        state = decode_cursor(cursor, filters, {"tenant_id", "created_at", "lead_id"})
+        if self.use_memory or not self._table:
+            leads = [
+                lead for lead in self._memory_store.values()
+                if lead.tenant_id == settings.effective_tenant_id
+                and start_at <= lead.created_at <= end_at
+            ]
+            leads.sort(key=lambda lead: (lead.created_at, lead.lead_id))
+            offset = int(state.get("offset", 0))
+            page = leads[offset:offset + limit]
+            has_more = offset + len(page) < len(leads)
+            next_cursor = encode_cursor({"offset": offset + len(page), "filter": filters}) if has_more else None
+        else:
+            args = {
+                "IndexName": "tenant-created-index",
+                "KeyConditionExpression": Key("tenant_id").eq(settings.effective_tenant_id)
+                    & Key("created_at").between(start_at, end_at),
+                "ScanIndexForward": True,
+                "Limit": limit,
+                "ProjectionExpression": "#tenant, #created, #lead, #outcome, #value, #currency",
+                "ExpressionAttributeNames": {
+                    "#tenant": "tenant_id", "#created": "created_at", "#lead": "lead_id",
+                    "#outcome": "sales_outcome", "#value": "sales_value", "#currency": "sales_currency",
+                },
+            }
+            if state.get("last_key"):
+                args["ExclusiveStartKey"] = state["last_key"]
+            response = self._table.query(**args)
+            page = response.get("Items", [])
+            last_key = response.get("LastEvaluatedKey")
+            next_cursor = encode_cursor({"last_key": last_key, "filter": filters}) if last_key else None
+
+        counts = {"total": len(page), "won": 0, "lost": 0, "disqualified": 0, "open": 0}
+        won_value_by_currency: dict[str, Decimal] = {}
+        for lead in page:
+            outcome = lead.sales_outcome.value if isinstance(lead, Lead) and lead.sales_outcome else (
+                lead.get("sales_outcome") if isinstance(lead, dict) else None
+            )
+            outcome = getattr(outcome, "value", outcome)
+            if outcome not in {"won", "lost", "disqualified"}:
+                counts["open"] += 1
+                continue
+            counts[outcome] += 1
+            if outcome == "won":
+                amount = lead.sales_value if isinstance(lead, Lead) else lead.get("sales_value")
+                currency = lead.sales_currency if isinstance(lead, Lead) else lead.get("sales_currency")
+                if amount is not None and currency:
+                    try:
+                        won_value_by_currency[currency] = won_value_by_currency.get(currency, Decimal("0")) + Decimal(str(amount))
+                    except (InvalidOperation, ValueError):
+                        continue
+
+        return {
+            "counts": counts,
+            "won_value_by_currency": {currency: format(value, "f") for currency, value in won_value_by_currency.items()},
+            "next_cursor": next_cursor,
+            "consistency": "eventually_consistent",
+        }
 
     def update(self, lead_id: str, lead_update: LeadUpdate) -> Optional[Lead]:
         lead = self.get_by_id(lead_id)

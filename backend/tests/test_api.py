@@ -3,6 +3,8 @@ LeadRescue AI — API Integration Tests
 Tests all Phase 2 backend REST API endpoints using TestClient.
 """
 
+from datetime import datetime, timedelta, timezone
+
 from fastapi.testclient import TestClient
 from app.main import app
 
@@ -189,3 +191,20 @@ def test_sales_outcome_respects_privacy_and_opt_out_guards():
     assert opted_out_lead.status_code == 201
     suppressed = client.put(f"/api/leads/{opted_out_lead.json()['lead_id']}/outcome", json={"outcome": "won"})
     assert suppressed.status_code == 409
+
+
+def test_outcome_report_is_bounded_and_returns_explicit_cohort_and_consistency():
+    today = datetime.now(timezone.utc).date().isoformat()
+    response = client.get(f"/api/reports/outcomes?start_date={today}&end_date={today}")
+
+    assert response.status_code == 200
+    report = response.json()
+    assert report["start_date"] == today
+    assert report["end_date"] == today
+    assert report["cohort"] == "lead_created_at_utc"
+    assert report["consistency"] == "eventually_consistent"
+    assert set(report["counts"]) == {"total", "won", "lost", "disqualified", "open"}
+
+    future = (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
+    invalid = client.get(f"/api/reports/outcomes?start_date={today}&end_date={future}")
+    assert invalid.status_code == 422
