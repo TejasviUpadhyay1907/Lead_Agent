@@ -12,6 +12,12 @@ The product hypothesis worth validating is narrower and outcome-led: **a CRM-adj
 
 The next integration should preserve the customer's CRM as the system of record and close one end-to-end loop: source event → safe deduplicated intake → triage → assigned human review → consent-checked provider delivery → provider receipt → CRM update → conversion and response-time reporting. Validate the first CRM/channel with a target customer before implementing a vendor-specific connector; do not position the generic webhook as a completed CRM integration.
 
+### Pilot connector default to validate (2026-09-24)
+
+With an India-based SMB pilot as the working assumption and no customer stack specified, the recommended first connector candidate is **Zoho CRM + Meta WhatsApp Business Platform (Cloud API)**. Treat this as a default to confirm with the design partner, not as a universal market choice. Zoho exposes OAuth 2.0 delegated API access and CRM record webhooks, which fit customer-authorized read/write synchronization; WhatsApp has a hosted developer hub with test numbers, webhooks, a sandbox, and delivery integration material. WhatsApp policy requires permission to message, honoring opt-outs, and approved templates to initiate conversations, so consent provenance, template selection, and delivery status must be first-class workflow gates. See [Zoho OAuth](https://www.zoho.com/crm/developer/docs/api/v8/oauth-overview.html), [Zoho CRM webhooks](https://www.zoho.com/crm/developer/docs/api/v8/create-webhook.html), [WhatsApp Business developer hub](https://whatsappbusiness.com/developers/developer-hub/), and [WhatsApp Business Messaging Policy](https://whatsappbusiness.com/policy/).
+
+Do not build around an assumed customer's WhatsApp number, Zoho account, or consent records. Begin with a sandbox and an explicit field mapping, then verify OAuth scopes, region/data handling, approved message templates, webhook signatures/retries, provider receipts, and CRM update semantics with the selected pilot owner.
+
 ## Confirmed gaps
 
 | Area | Current evidence | Required before selling |

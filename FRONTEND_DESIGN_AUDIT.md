@@ -20,7 +20,8 @@
 - At **390×844**, the sidebar becomes a closed off-canvas navigation, the inbox switches to cards, the table is hidden, and the lead-detail columns collapse to one column. The document remains narrower than the viewport, so no horizontal page scroll is introduced.
 - At the existing **760×694** browser viewport, the mobile inbox representation is selected and the page has no horizontal document overflow.
 - The demo API ran locally with synthetic in-memory records only. No outbound message, CRM connection, customer data, or persistent company-data mutation was used.
-- Automated screenshot capture was unavailable in the browser session, so these checks establish DOM structure and computed CSS, not pixel-by-pixel visual approval.
+- Continuation review (2026-09-24): launched the local frontend/backend in synthetic mode, seeded five in-memory example leads, and generated the new outcomes report. The observed page showed all five leads as open and no partial report state; the cohort dates and eventual-consistency/manual-value caveats were visible. No browser console errors occurred. On this view, semantic headings were H1 then H2 sections, the reporting select had a programmatic label, all buttons had accessible names, the document language was `en`, and no duplicate IDs were found. Keyboarding from the page start reached the skip link with a visible 2.4px focus outline. This was a 760×694 synthetic smoke review, not a full keyboard/screen-reader pass or WCAG audit.
+- Visual screenshots can now be captured in the browser session, but prior checks still do not establish pixel-by-pixel approval across all routes and target devices.
 
 ## Remaining design and UX work
 
