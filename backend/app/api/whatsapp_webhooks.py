@@ -121,6 +121,13 @@ async def receive_meta_webhook(
                 message = None
                 if isinstance(correlation_id, str) and re.fullmatch(r"[a-f0-9]{64}", correlation_id):
                     message = messages_repo.get(correlation_id)
+                    # Once Meta's provider ID is bound to an attempt, an opaque
+                    # callback ID must not be able to replace it. A first status
+                    # may arrive before the send response and bind the ID here.
+                    if message and message.provider_message_id and not hmac.compare_digest(
+                        message.provider_message_id, provider_message_id
+                    ):
+                        continue
                 if not message:
                     message = messages_repo.find_by_provider_id(provider_message_id)
                 if not message:

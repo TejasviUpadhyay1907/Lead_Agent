@@ -4,6 +4,11 @@
 **Purpose:** Transferable state-of-project briefing and next-goal definition
 **Workspace:** `C:\Users\tejas\OneDrive\Desktop\TEST\Lead_Agent`
 
+### Continuation update — 2026-09-24: protect WhatsApp provider identity binding
+
+- Tightened the signed Meta status callback path: if a callback references a known opaque attempt ID but carries a provider message ID different from the one already bound to that attempt, the callback is ignored for that attempt. This prevents a callback from rewriting an established provider identity. A first valid callback can still bind the provider ID when it arrives before the outbound API response is persisted.
+- This is a source-level integrity hardening; no Meta sandbox callback was exercised in this work. The existing automated quality and CodeQL runs passed on the preceding published commit `71a5a98`; this uncommitted continuation has not yet been run through tests or CI.
+
 ## Executive assessment
 
 LeadRescue AI is a technically substantial, pre-pilot prototype for rescuing inbound sales leads. It is designed to receive and triage leads, calculate deterministic priority and risk, generate a response draft, and let a human decide what happens. Its strongest architectural decision is: **AI understands; deterministic software decides; humans approve.**
