@@ -42,7 +42,7 @@ The commercial promise should ultimately be measured as faster first response, f
 - React 18 and Vite single-page application with dashboard, lead inbox/detail, follow-ups, activity, and settings views.
 - Browser OIDC Authorization Code with PKCE flow and in-memory access-token handling.
 - Lead review/actions, status/risk/priority presentation, analysis-job submission and polling, and API pagination.
-- The browser experience is implemented, but visual polish or a successful build does not establish usability with real sales teams; OIDC setup and user research remain unverified.
+- The browser styling and responsive layout were corrected and checked in a local synthetic session; neither this check nor a successful build establishes usability with real sales teams. OIDC provider setup, complete accessibility review, and user research remain unverified.
 
 ### Backend and agent
 
@@ -52,6 +52,7 @@ The commercial promise should ultimately be measured as faster first response, f
 - Stored contact identifiers and common name/email/phone patterns are redacted from model context; the original inquiry remains in company storage. This does not establish complete detection of unusual identifiers or other sensitive content.
 - Browser lead analysis uses durable SQS jobs and authenticated status polling, with idempotency, bounded retries, terminal job state, a DLQ, and alarms. A synchronous analyze endpoint remains for compatibility.
 - Local/demo mode uses synthetic in-memory repositories; production SAM defaults disable demo mode.
+- Frontend design audit (2026-09-24): the local browser initially proved that `main.jsx` did not import the existing stylesheet, so no CSS loaded in any view. Corrected the entry point and added the missing shared shell/view/responsive styles, focus-visible treatment, and reduced-motion handling; removed the remote Google Fonts import. Local synthetic demo browser checks verified the main sales routes and desktop/mobile inbox/detail layout. Full screenshot-based visual review and sales-user usability/accessibility review remain open. See [FRONTEND_DESIGN_AUDIT.md](FRONTEND_DESIGN_AUDIT.md).
 
 ### Data, identity, and safety controls
 
@@ -70,6 +71,7 @@ The commercial promise should ultimately be measured as faster first response, f
 - AWS SAM template provisions API Gateway, Lambda, DynamoDB tables/indexes, SQS/DLQ, Bedrock invocation IAM, Secrets Manager references, CloudWatch alarms/log retention, and deployment parameters. Static frontend hosting is described as S3 + CloudFront.
 - Core tables enable point-in-time recovery; API throttling and worker concurrency limits are configurable. Bedrock requires an explicit geographic inference profile/model pair.
 - GitHub Actions quality workflow builds the frontend, verifies the Python dependency lock, runs backend tests, checks Python syntax, and validates SAM. Actions are pinned to immutable SHAs and jobs use Ubuntu 24.04.
+- A separate immutable-SHA CodeQL workflow now analyzes frontend and backend source on pull requests, `main` pushes, and weekly; its first sensitive-logging finding was fixed and GitHub marks it resolved. No open CodeQL alerts remain.
 - GitHub Actions run [35889677117](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35889677117) passed both jobs for the benchmark commit. CI is source/build evidence; it is not AWS deployment, IAM authorization, data migration, or production-readiness evidence.
 - Security/dependency scanning, branch-protection enforcement, cloud integration tests, an actual staging deploy, verified SNS/on-call delivery, dashboards/tracing/SLOs, and operational recovery exercises are not evidenced.
 
