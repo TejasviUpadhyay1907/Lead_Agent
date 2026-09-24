@@ -2,7 +2,7 @@
 
 ## Current continuation checkpoint (2026-09-24)
 
-Latest implementation adds a Meta WhatsApp Cloud API send path with a durable one-attempt ledger, rendered-template preview/history, signed status webhook, and durable inbound opt-out suppression. Outbound is explicitly disabled by default; neither the Meta path nor Zoho intake has been validated against a vendor sandbox, and no isolated AWS staging deployment is proven. Zoho still has create-only intake, no OAuth lifecycle, no edit reconciliation, and no CRM writeback. The first integration candidate remains Zoho CRM + Meta WhatsApp Business Platform for an India-based SMB, subject to design-partner confirmation. Market readiness remains pre-staging/pre-pilot.
+Latest implementation adds a Meta WhatsApp Cloud API send path with a durable one-attempt ledger, send confirmation bound to the exact template/account preview, rendered-message history, signed status webhook, and durable inbound opt-out suppression linked to per-lead audit history. Outbound is blocked in local/demo and explicitly disabled by default; neither the Meta path nor Zoho intake has been validated against a vendor sandbox, and no isolated AWS staging deployment is proven. Zoho still has create-only intake, no OAuth lifecycle, no edit reconciliation, and no CRM writeback. The first integration candidate remains Zoho CRM + Meta WhatsApp Business Platform for an India-based SMB, subject to design-partner confirmation. Market readiness remains pre-staging/pre-pilot.
 
 ## Assessment
 
