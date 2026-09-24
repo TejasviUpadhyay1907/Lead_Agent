@@ -14,7 +14,7 @@ Do not describe it as production-ready, fully integrated with company data, auto
 
 ## Current repository snapshot (2026-09-24)
 
-- **Current published commit:** `ae5024416060e29e698e5dc413f6d1b48fb76b89` is on local `main`, `origin/main`, and GitHub `main`; quality run [35976342364](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35976342364) and CodeQL run [35976342464](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35976342464) both passed on this exact SHA. This source-check evidence does not establish cloud deployment or runtime behavior.
+- **Current published state:** latest `main` is `9d26e445695788209b7238bb46b0781fd99b70ba`; it adds only the audit-note refresh to feature commit `ae5024416060e29e698e5dc413f6d1b48fb76b89`. Local `main`, `origin/main`, and GitHub `main` are synchronized. Quality run [35976342364](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35976342364) and CodeQL run [35976342464](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35976342464) both passed on the feature SHA; this source-check evidence does not establish cloud deployment or runtime behavior.
 - A read-only GitHub API check confirms `main` has no branch-protection rules. A read-only AWS STS probe found no usable AWS credentials in this local environment; this does not prove the company has no AWS account or staging stack.
 - Local verification on the outcome-capture plus outcome-report change: full backend suite **166 passed** (two upstream deprecation warnings); frontend `npm run build` passed; focused report tests pass; `git diff --check` passes. GitHub quality and CodeQL passed on the published report change.
 
