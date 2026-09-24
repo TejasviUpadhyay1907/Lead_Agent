@@ -7,7 +7,7 @@
 ### Continuation update — 2026-09-24: protect WhatsApp provider identity binding
 
 - Tightened the signed Meta status callback path: if a callback references a known opaque attempt ID but carries a provider message ID different from the one already bound to that attempt, the callback is ignored for that attempt. This prevents a callback from rewriting an established provider identity. A first valid callback can still bind the provider ID when it arrives before the outbound API response is persisted.
-- This is a source-level integrity hardening; no Meta sandbox callback was exercised in this work. The existing automated quality and CodeQL runs passed on the preceding published commit `71a5a98`; this uncommitted continuation has not yet been run through tests or CI.
+- Published as `049f47fbb081661b76bbb2de25683d7f89a792c9`. GitHub Quality Gates run [35986971922](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35986971922) and CodeQL run [35986971986](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35986971986) passed for this commit. No Meta sandbox callback was exercised, so provider behavior remains unproven.
 
 ## Executive assessment
 
