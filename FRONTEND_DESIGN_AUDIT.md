@@ -1,7 +1,7 @@
 # LeadRescue frontend design-debt audit
 
-**Audit date:** 2026-09-24  
-**Scope:** React frontend shell and its main operational views, using the local synthetic-data mode.  
+**Audit date:** 2026-09-24
+**Scope:** React frontend shell and its main operational views, using the local synthetic-data mode.
 **Evidence:** Browser inspection of Overview, Leads, Lead detail, Follow-ups, Activity, Settings, and Privacy requests; computed-style and responsive-layout inspection at 390×844, 760×694, and 1440×900; source inventory of JSX classes and CSS selectors. No customer account or company data was used.
 
 ## Findings and changes
