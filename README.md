@@ -65,7 +65,7 @@ React/Vite → S3+CloudFront → API Gateway → Lambda+FastAPI
 | Backend | Python 3.12 + FastAPI + Mangum |
 | Agent | Strands Agents SDK |
 | LLM | Amazon Bedrock (configurable model) |
-| Database | DynamoDB (8 tables, including privacy requests, durable jobs, suppressions, and webhook deduplication) |
+| Database | DynamoDB (9 tables, including WhatsApp delivery, privacy requests, durable jobs, suppressions, and webhook deduplication) |
 | Hosting | S3 + CloudFront |
 | API | API Gateway + Lambda |
 | IaC | AWS SAM |
@@ -79,7 +79,7 @@ React/Vite → S3+CloudFront → API Gateway → Lambda+FastAPI
 | API Gateway | REST API |
 | DynamoDB | Lead, follow-up, audit, config, webhook idempotency, customer suppression, analysis jobs, and privacy request storage |
 | Bedrock | Foundation model inference |
-| Secrets Manager | Inbound webhook HMAC secret |
+| Secrets Manager | Inbound webhook, Zoho webhook, WhatsApp provider, and customer-index secrets |
 | S3 | Frontend hosting |
 | CloudFront | CDN + HTTPS |
 | CloudWatch | Logs |
@@ -161,7 +161,7 @@ Before applying the migration, take/verify a DynamoDB backup or point-in-time re
 
 Inbound integrations include a generic signed webhook and an optional Zoho CRM lead-create endpoint. For Zoho, configure a separate `ZohoWebhookSecretArn` and follow [INTEGRATIONS.md](INTEGRATIONS.md) to map fields and set a create-only workflow. The Zoho endpoint permanently deduplicates source record IDs; it does not sync edits or write back to CRM, and still needs sandbox validation. A separate, opt-in Meta WhatsApp delivery path now supports evidence-backed consent, explicit one-attempt sends, signed status receipts, durable opt-out suppression, and exportable message history. Outbound stays disabled by default and has not been validated with a Meta sandbox or customer template. See [INTEGRATIONS.md](INTEGRATIONS.md) for setup and release gates.
 
-WhatsApp contact permission is stored separately from inquiry data and human response approval. Operators must attach an evidence reference, consent wording version, source, timestamp, and explicit verification; the proof is bound to the current phone using the tenant's HMAC key. The approved response draft is also bound to its exact text hash. These safeguards do not connect a message provider or send messages.
+WhatsApp contact permission is stored separately from inquiry data and human response approval. Operators must attach an evidence reference, consent wording version, source, timestamp, and explicit verification; the proof is bound to the current phone using the tenant's HMAC key. The approved response draft is also bound to its exact text hash. A separate operator action can send one approved, template-rendered message through Meta WhatsApp after checking the consent, current phone, suppression, privacy hold, approval, and preview fingerprint. Signed Meta callbacks update delivery history; inbound English STOP requests create durable suppression. The outbound feature is disabled by default and has not been verified against a Meta sandbox, so do not enable it for customer traffic without partner and deployment validation.
 
 Lead analysis in the browser uses the durable job endpoint (`POST /api/leads/{lead_id}/analysis-jobs`, with an `Idempotency-Key` header) and polls `GET /api/leads/analysis-jobs/{job_id}`. SQS retries failed worker deliveries and sends exhausted/crashed jobs to a dead-letter queue; the required alarm topic receives worker errors/throttles, queue delay, and dead-letter alarms. The older `POST /api/leads/{lead_id}/analyze` endpoint remains synchronous for compatibility; new integrations should use the job flow.
 
