@@ -281,7 +281,7 @@ class LeadRescueAgent:
         location_text = f" for delivery to {location}" if location else ""
         response_draft = (
             f"Hi {customer_name}! Thank you for contacting {business_rules.get('business_name', 'our team')}{product_text}{location_text}. "
-            "Our technical specialist will review your request and contact you shortly with full specs and pricing."
+            "I've noted your request. Our team will review it and follow up with the information we can confirm."
         )
 
         result = AgentAnalysisResult(

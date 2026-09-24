@@ -689,6 +689,8 @@ textarea {
 .safety-banner { display: flex; align-items: center; gap: .9rem; padding: 1rem; border: 1px solid var(--border-hot); border-radius: var(--radius-md); background: var(--bg-hot); color: #fda4af; }
 .safety-banner h2 { margin: .2rem 0; font-size: .95rem; }
 .safety-banner p,.safety-policy,.draft-disclaimer { color: var(--text-muted); font-size: .75rem; }
+.draft-claim-warning { display: grid; gap: .2rem; padding: .7rem .8rem; border-left: 3px solid var(--color-warm); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; background: var(--bg-warm); color: var(--text-main); font-size: .76rem; }
+.draft-claim-warning span { color: var(--text-muted); line-height: 1.5; }
 .safety-banner .opt-out-label { margin-left: auto; color: #fda4af; }
 .risk-callout { padding: .8rem; border-left: 3px solid var(--color-warm); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; background: var(--bg-warm); color: var(--text-main); font-size: .8rem; }
 .draft-editor { width: 100%; min-height: 140px; resize: vertical; padding: .8rem; border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--bg-dark-0); color: var(--text-main); line-height: 1.6; }

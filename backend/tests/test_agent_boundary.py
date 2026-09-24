@@ -8,6 +8,11 @@ from pydantic import ValidationError
 
 from app.models.agent import AgentAnalysisResult
 from app.models.enums import CustomerStageEnum, IntentEnum, UrgencyEnum
+from app.agent.prompts import LEAD_RESCUE_SYSTEM_PROMPT
+
+
+def test_prompt_forbids_unsupported_customer_commitments():
+    assert "Do not promise a response time" in LEAD_RESCUE_SYSTEM_PROMPT
 
 
 def test_valid_agent_analysis_result():

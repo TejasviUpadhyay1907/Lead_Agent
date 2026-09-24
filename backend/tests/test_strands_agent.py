@@ -45,6 +45,11 @@ def test_canonical_rahul_understanding(monkeypatch):
     assert result.location == "Pune"
     assert result.customer_stage == CustomerStageEnum.NEW
     assert "CNC machines" in result.key_entities
+    assert "CNC machines" in result.response_draft
+    assert "Pune" in result.response_draft
+    assert "shortly" not in result.response_draft.lower()
+    assert "technical specialist" not in result.response_draft.lower()
+    assert "full specs and pricing" not in result.response_draft.lower()
 
     # Deterministic fields MUST NOT exist on AgentAnalysisResult
     assert not hasattr(result, "score")
