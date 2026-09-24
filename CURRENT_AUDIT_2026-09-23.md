@@ -14,16 +14,17 @@ Do not describe it as production-ready, fully integrated with company data, auto
 
 ## Current repository snapshot (2026-09-24)
 
-- **Latest verified publication:** local `main`, `origin/main`, and GitHub `main` are at `4cfd2cd98ab8c191877ffd888b28bea75f062a9d`, and the worktree was clean before this audit-note correction. Quality run [35964650735](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35964650735) and CodeQL run [35964650767](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35964650767) both passed on that exact commit; GitHub reports zero open code-scanning alerts. These are source checks, not proof of a cloud deployment or runtime behavior.
+- **Latest verified publication before this audit-note update:** local `main`, `origin/main`, and GitHub `main` are at `8add9fa4e38fe2a062c98750bdbe682bac654b51`; the worktree was clean before editing this note. Quality run [35975052139](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35975052139) and CodeQL run [35975052123](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35975052123) both passed on that exact commit; GitHub reports zero open code-scanning alerts. These are source checks, not proof of a cloud deployment or runtime behavior.
 - A read-only GitHub API check confirms `main` has no branch-protection rules. A read-only AWS STS probe found no usable AWS credentials in this local environment; this does not prove the company has no AWS account or staging stack.
+- Local verification on the outcome-capture change: full backend suite **164 passed** (two upstream deprecation warnings); frontend `npm run build` passed; `git diff --check` passed. GitHub quality and CodeQL workflows also passed on the exact pushed code commit.
 
 The entries below this snapshot include chronological history from earlier points in the review; use the latest verified publication and later continuation updates as current state.
 
 - The review began from `3d0d1403003a882361c8b18d4bd8904063afcb7b`; this privacy-review implementation and its verification were published as `3008e3344588c9857c1b1dbbed6001b674538516` on `main` and `origin/main`. The worktree is clean after publication.
 - The pre-publication change set covered 30 modified tracked files and 4 new files. It added a metadata-only admin privacy-request queue, audited status transitions, intake detection, a per-lead processing hold across AI analysis/response/follow-up/rescue, regression tests, and admin-only paginated candidate lookup over matching email/phone indexes after identity is marked verified.
-- Local checks now pass on this worktree: frontend `npm run build`; backend `python -m compileall -q app scripts`; backend `python -m pytest -q -p no:cacheprovider` (158 passed, one third-party Mangum deprecation warning); and `sam validate --template-file template.yaml --lint`. `git diff --check` reported no whitespace errors; Git printed expected LF-to-CRLF conversion warnings. These checks do not verify deployed AWS behavior, real OIDC/Bedrock, IAM, or vendor integrations. The changes are committed and pushed, but not deployed.
+- At the earlier privacy-review checkpoint, frontend build, Python compilation, backend suite (158 passed), and SAM lint validation passed. Those historical results do not describe the current suite count. The current outcome-capture change passed the local checks listed in the repository snapshot above; neither set of checks establishes deployed AWS behavior, real OIDC/Bedrock, IAM, or vendor integrations.
 - Privacy request completion is an administrator attestation. The new lookup returns candidate lead records matching the request lead's stored email or normalized phone, only after identity is marked verified; it cannot guarantee a complete person-wide inventory across changed identifiers or other connected systems. The product still does not automatically verify identity, fulfill subject-wide access/erasure, manage retention/legal holds, or prove legal deadlines. An erasure request triggers durable contact suppression; lead and related data remain stored pending a controlled fulfillment process.
-- Current maturity remains advanced prototype / pilot preparation, not customer-pilot-ready or generally sellable. The next source milestone is to complete a deeper privacy workflow review and preserve the passing checks while addressing discovered edge cases. The next release milestone remains customer-like staging proof for one isolated deployment, including real identity, approved Bedrock geography, an actual source and consent-aware delivery integration, migrations, monitoring, restore/recovery, security/load/quality evidence, and an operational owner.
+- Current maturity remains advanced prototype / pilot preparation, not customer-pilot-ready or generally sellable. The next source milestones are complete company-level outcome reporting and a customer-selected CRM/channel connector with delivery receipts. The release milestone remains customer-like staging proof for one isolated deployment, including real identity, approved Bedrock geography, a real lead source and consent-aware delivery, migrations, monitoring, restore/recovery, security/load/quality evidence, and an operational owner.
 
 ## What the product is for
 
@@ -62,6 +63,7 @@ The commercial promise should ultimately be measured as faster first response, f
 - OIDC token validation, audience/scope/tenant checks, role-gated customer data access, and tenant-scoped repository queries.
 - Current first-customer design is one isolated deployment per customer, not a shared SaaS control plane.
 - Important lead, follow-up, response-review, lifecycle, and business-configuration changes are transactionally paired with audit events and use conditional writes against stale updates.
+- Operators can record `won`, `lost`, or `disqualified` outcomes on a lead. Won outcomes may include exact numeric value and a three-letter currency code; lost/disqualified outcomes require a reason. The API resolves the lifecycle, applies privacy/opt-out checks, and transactionally records the lead and actor-attributed audit event. Lead detail labels the entry manual and unsynced. This captures data only; no company-wide outcome report or revenue attribution is implemented.
 - Inbound integration endpoint accepts a bounded, schema-validated HMAC-signed webhook with timestamp/replay checking, payload-bound idempotency, duplicate handling, and transactional lead/audit/event persistence.
 - Email/phone opt-outs are represented by a durable suppression registry, checked across future activity, with transactional safeguards and fail-closed migration/readiness markers.
 - Contact-history and suppression indexes use HMAC-derived values from a per-deployment Secrets Manager key; dry-run-first migration/backfill scripts are present.
@@ -79,6 +81,12 @@ The commercial promise should ultimately be measured as faster first response, f
 - Security/dependency scanning, branch-protection enforcement, cloud integration tests, an actual staging deploy, verified SNS/on-call delivery, dashboards/tracing/SLOs, and operational recovery exercises are not evidenced.
 
 ## Audit evidence and current checkout state
+
+### Continuation update — 2026-09-24: auditable sales outcomes
+
+- Added a sales-outcome endpoint and lead-detail UI for operator-entered `won`, `lost`, and `disqualified` results, with optional won amount/currency, required reasons for loss/disqualification, timestamps, lifecycle resolution, optimistic concurrency, and audit history. Privacy-held and opted-out/suppressed records reject updates.
+- Deal values use decimal validation and are stored as DynamoDB numeric values; a repository regression check verifies exact decimal serialization. Outcome reporting and conversion attribution across the company remain unimplemented.
+- Local full backend suite passes **164 tests** and focused API tests pass **12 tests**. Frontend production build succeeds. GitHub quality and CodeQL runs [35975052139](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35975052139) and [35975052123](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35975052123) passed on code commit `8add9fa4e38fe2a062c98750bdbe682bac654b51`. No AWS staging or CRM integration was exercised.
 
 ### Continuation update — 2026-09-24
 
