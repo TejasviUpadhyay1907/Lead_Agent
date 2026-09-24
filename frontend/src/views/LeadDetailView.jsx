@@ -55,7 +55,7 @@ export function LeadDetailView({ leadId, onBack, onRefreshLeads, revision, confi
             let result;
             if (action === 'analyze') result = await api.analyzeLead(leadId);
             else if (action === 'rescue') result = await api.rescueLead(leadId);
-            else result = await api.respondToLead(leadId, action, action === 'reject' ? undefined : text);
+            else result = await api.respondToLead(leadId, action, action === 'reject' ? undefined : text, action === 'approve' && reviewed);
             dirtyRef.current = false; setEditing(false); setReviewed(false); setModal(null);
             if (result?.lead_id) { setLead(result); setText(result.response_draft || ''); }
             setNotice({ tone: action === 'rescue' && !result.rescued ? 'info' : 'success', text: action === 'rescue' ? result.rescued ? `Priority follow-up scheduled${result.due_at ? ` for ${dateTime(result.due_at)}` : ''}. Human review is still required; nothing was sent.` : `Rescue was not scheduled.${result.reason ? ` ${result.reason}` : ' The policy engine did not permit this action.'}` : action === 'analyze' ? 'Analysis returned. Review the extracted context and policy decision below.' : action === 'approve' ? 'Approval recorded. No message was sent; delivery is not configured.' : action === 'edit' ? 'Your edited draft was saved. Review it before approving.' : 'Response rejected. No message was sent.' });

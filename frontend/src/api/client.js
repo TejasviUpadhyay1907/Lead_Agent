@@ -150,9 +150,9 @@ export const api = {
         throw error;
     },
 
-    respondToLead: (id, action, editedDraft) => request(`/leads/${id}/response`, {
+    respondToLead: (id, action, editedDraft, claimsVerified = false) => request(`/leads/${id}/response`, {
         method: 'PUT',
-        body: JSON.stringify({ action, edited_draft: editedDraft }),
+        body: JSON.stringify({ action, edited_draft: editedDraft, claims_verified: claimsVerified }),
     }),
 
     rescueLead: (id) => request(`/leads/${id}/rescue`, {

@@ -104,9 +104,17 @@ def test_rahul_sharma_end_to_end_workflow():
     assert get_res_2.json()["response_status"] == "draft"
 
     # 14-16. Approve response via canonical PUT /api/leads/{id}/response
-    resp_res = client.put(
+    unverified_resp = client.put(
         f"/api/leads/{lead_id}/response",
         json={"action": "approve"},
+    )
+    assert unverified_resp.status_code == 400
+    assert "factual claims" in unverified_resp.json()["detail"]
+    assert client.get(f"/api/leads/{lead_id}").json()["response_status"] == "draft"
+
+    resp_res = client.put(
+        f"/api/leads/{lead_id}/response",
+        json={"action": "approve", "claims_verified": True},
     )
     assert resp_res.status_code == 200
     responded = resp_res.json()
@@ -119,7 +127,7 @@ def test_rahul_sharma_end_to_end_workflow():
     # Repeated approval is idempotent and does not add another audit event.
     repeated_approval = client.put(
         f"/api/leads/{lead_id}/response",
-        json={"action": "approve"},
+        json={"action": "approve", "claims_verified": True},
     )
     assert repeated_approval.status_code == 200
     assert repeated_approval.json()["response_status"] == "approved"
@@ -134,6 +142,8 @@ def test_rahul_sharma_end_to_end_workflow():
     assert "response_approved" in actions
     assert actions.count("response_approved") == 1
     assert "response_simulated_sent" not in actions
+    approved_event = next(event for event in audit_res.json() if event["action"] == "response_approved")
+    assert approved_event["details"]["claims_verified"] is True
 
 
 def test_sunita_rao_end_to_end_opt_out_workflow():

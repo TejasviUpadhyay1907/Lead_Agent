@@ -10,7 +10,7 @@ from typing import List, Optional
 from datetime import timedelta
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 import boto3
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
 from app.agent.lead_agent import LeadRescueAgent
 from app.api.deps import get_audit_repo, get_config_repo, get_followups_repo, get_leads_repo, get_privacy_requests_repo
@@ -39,6 +39,7 @@ class ResponseActionRequest(BaseModel):
     action: str = Field(..., description="Action type: approve | edit | reject")
     edited_draft: Optional[str] = Field(None, description="Edited draft text when action is 'edit' or 'approve'")
     response_draft: Optional[str] = Field(None, description="Alias for edited_draft for backwards compatibility")
+    claims_verified: StrictBool = Field(False, description="Human attestation that factual claims were checked before approval")
 
 
 class UpdateStatusRequest(BaseModel):
@@ -472,6 +473,11 @@ def process_response_action(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No valid response draft available for approval.",
             )
+        if not req.claims_verified:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Verify the response draft's factual claims before recording approval.",
+            )
         if lead.response_status == ResponseStatusEnum.SENT:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -505,7 +511,7 @@ def process_response_action(
                 lead_id=lead_id,
                 action="response_approved",
                 actor=f"user:{actor_id}",
-                details={"action": "approve", "delivery_status": "not_configured"},
+                details={"action": "approve", "claims_verified": True, "delivery_status": "not_configured"},
             ),
         )
 
