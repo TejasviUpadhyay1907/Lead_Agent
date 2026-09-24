@@ -781,6 +781,15 @@ textarea {
 .consent-evidence { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: .65rem; }
 .consent-evidence span { display: grid; gap: .2rem; color: var(--text-muted); font-size: .72rem; overflow-wrap: anywhere; }
 .consent-evidence strong { color: var(--text-main); font-size: .67rem; }
+.whatsapp-delivery-panel { display: grid; gap: .8rem; }
+.delivery-header-actions { display: flex; align-items: center; gap: .65rem; flex-wrap: wrap; }
+.whatsapp-delivery-record { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: .65rem .75rem; padding: .75rem; border: 1px solid var(--border-subtle); border-radius: 12px; }
+.delivery-icon { display: grid; place-items: center; width: 2rem; height: 2rem; flex: 0 0 auto; border-radius: 10px; background: var(--accent-soft); color: var(--accent-primary); }
+.whatsapp-delivery-record > span:nth-child(2) { display: grid; gap: .2rem; min-width: 0; }
+.whatsapp-delivery-record strong { color: var(--text-main); font-size: .8rem; }
+.whatsapp-delivery-record small { color: var(--text-muted); font-size: .7rem; }
+.delivery-reference { grid-column: 2; }
+.delivery-copy { grid-column: 2; margin: 0; color: var(--text-main); font-size: .78rem; overflow-wrap: anywhere; }
 .consent-attestation { grid-column: 1 / -1; display: flex; align-items: flex-start; gap: .55rem; color: var(--text-muted); font-size: .72rem; line-height: 1.5; }
 .consent-attestation input { margin-top: .15rem; accent-color: var(--accent-primary); }
 .consent-attestation strong { color: var(--text-main); }

@@ -8,10 +8,13 @@ import { AIAnalysisPanel, PolicyDecisionPanel, ResponseComposer } from '../compo
 import { ActivityTimeline } from '../components/Common/ActivityTimeline';
 import { OutcomeTracker } from '../components/Common/OutcomeTracker';
 import { WhatsAppConsentPanel } from '../components/Common/WhatsAppConsentPanel';
+import { WhatsAppDeliveryPanel } from '../components/Common/WhatsAppDeliveryPanel';
 
 export function LeadDetailView({ leadId, onBack, onRefreshLeads, revision, config, clock, followups, followupsError }) {
     const [lead, setLead] = useState(null);
     const [audit, setAudit] = useState([]);
+    const [whatsappMessages, setWhatsAppMessages] = useState([]);
+    const [whatsappConfig, setWhatsAppConfig] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [auditError, setAuditError] = useState(false);
@@ -32,7 +35,7 @@ export function LeadDetailView({ leadId, onBack, onRefreshLeads, revision, confi
     useEffect(() => {
         const version = ++loadVersion.current;
         setError(null);
-        Promise.allSettled([api.getLead(leadId), api.getAudit(leadId)]).then(([record, events]) => {
+        Promise.allSettled([api.getLead(leadId), api.getAudit(leadId), api.getWhatsAppMessages(leadId), api.getWhatsAppConfiguration()]).then(([record, events, delivery, providerConfig]) => {
             if (version !== loadVersion.current) return;
             if (record.status === 'fulfilled' && record.value?.lead_id) {
                 setLead(record.value);
@@ -44,6 +47,10 @@ export function LeadDetailView({ leadId, onBack, onRefreshLeads, revision, confi
             } else setError('The lead record could not be loaded. Refresh to see its current state.');
             if (events.status === 'fulfilled' && Array.isArray(events.value?.items)) { setAudit(events.value.items); setAuditCursor(events.value.nextCursor); setAuditError(false); }
             else { setAuditError(true); setAudit([]); setAuditCursor(null); }
+            if (delivery.status === 'fulfilled' && Array.isArray(delivery.value)) setWhatsAppMessages(delivery.value);
+            else setWhatsAppMessages([]);
+            if (providerConfig.status === 'fulfilled') setWhatsAppConfig(providerConfig.value);
+            else setWhatsAppConfig(null);
             setLoading(false);
         });
         return () => { loadVersion.current++; };
@@ -59,7 +66,7 @@ export function LeadDetailView({ leadId, onBack, onRefreshLeads, revision, confi
             else result = await api.respondToLead(leadId, action, action === 'reject' ? undefined : text, action === 'approve' && reviewed);
             dirtyRef.current = false; setEditing(false); setReviewed(false); setModal(null);
             if (result?.lead_id) { setLead(result); setText(result.response_draft || ''); }
-            setNotice({ tone: action === 'rescue' && !result.rescued ? 'info' : 'success', text: action === 'rescue' ? result.rescued ? `Priority follow-up scheduled${result.due_at ? ` for ${dateTime(result.due_at)}` : ''}. Human review is still required; nothing was sent.` : `Rescue was not scheduled.${result.reason ? ` ${result.reason}` : ' The policy engine did not permit this action.'}` : action === 'analyze' ? 'Analysis returned. Review the extracted context and policy decision below.' : action === 'approve' ? 'Approval recorded. No message was sent; delivery is not configured.' : action === 'edit' ? 'Your edited draft was saved. Review it before approving.' : 'Response rejected. No message was sent.' });
+            setNotice({ tone: action === 'rescue' && !result.rescued ? 'info' : 'success', text: action === 'rescue' ? result.rescued ? `Priority follow-up scheduled${result.due_at ? ` for ${dateTime(result.due_at)}` : ''}. Human review is still required; nothing was sent.` : `Rescue was not scheduled.${result.reason ? ` ${result.reason}` : ' The policy engine did not permit this action.'}` : action === 'analyze' ? 'Analysis returned. Review the extracted context and policy decision below.' : action === 'approve' ? 'Approval recorded. Sending requires a separate, explicit action.' : action === 'edit' ? 'Your edited draft was saved. Review it before approving.' : 'Response rejected. No message was sent.' });
             await onRefreshLeads();
             setRetry(value => value + 1);
         } catch (actionError) { setModal(null); setNotice({ tone: 'error', text: safeError(actionError, 'This action could not be confirmed. Refresh the lead and audit before retrying to avoid a duplicate action.') }); }
@@ -68,6 +75,7 @@ export function LeadDetailView({ leadId, onBack, onRefreshLeads, revision, confi
     if (loading) return <Skeleton rows={5} label="Loading lead context and policy…" />;
     if (error || !lead) return <div className="view-stack"><button className="back-link" onClick={onBack}><ArrowLeft size={16} /> Back to leads</button><ErrorState title="Unable to open this lead" description={error} onRetry={() => setRetry(value => value + 1)} /></div>;
     const optedOut = isOptedOut(lead);
+    const whatsappPreview = whatsappConfig?.template_body?.replace('{{1}}', lead.response_draft || '');
     const leadFollowups = followups.filter(item => item.lead_id === leadId);
     const nextFollowup = leadFollowups.filter(item => ['scheduled', 'overdue'].includes(item.status)).sort((a, b) => new Date(a.due_at) - new Date(b.due_at))[0];
     const events = [...audit].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
@@ -94,6 +102,29 @@ export function LeadDetailView({ leadId, onBack, onRefreshLeads, revision, confi
             setNotice({ tone: 'error', text: exportError?.status === 403 ? 'Only a company admin can export customer records.' : safeError(exportError, 'This record could not be exported. Refresh and try again.') });
         } finally { setExportBusy(false); }
     };
+    const refreshWhatsAppMessages = async () => {
+        try { setWhatsAppMessages(await api.getWhatsAppMessages(leadId)); }
+        catch (loadError) { setNotice({ tone: 'error', text: safeError(loadError, 'Delivery status could not be refreshed.') }); }
+    };
+    const sendWhatsApp = async () => {
+        if (actionRef.current || !lead || isBlocked(lead)) return;
+        actionRef.current = true; setBusy('whatsapp-send'); setModal(null); setNotice(null);
+        try {
+            const result = await api.sendWhatsAppMessage(leadId);
+            setWhatsAppMessages(current => [result, ...current.filter(item => item.message_id !== result.message_id)]);
+            const message = result.status === 'unknown' || result.status === 'submitting'
+                ? 'The provider outcome is uncertain. No automatic resend will occur; check the receipt or reconcile with Meta.'
+                : result.status === 'failed'
+                    ? 'Meta rejected the one-time send attempt. Review the response and audit before revising and reapproving.'
+                    : `Meta accepted the approved template request. Delivery status: ${result.status}.`;
+            setNotice({ tone: result.status === 'failed' || result.status === 'unknown' ? 'warning' : 'success', text: message });
+            setRetry(value => value + 1);
+            await onRefreshLeads();
+        } catch (sendError) {
+            setNotice({ tone: 'error', text: sendError?.status === 503 ? 'WhatsApp sending is disabled or its provider configuration is unavailable. No retry was made.' : safeError(sendError, 'The one-attempt request could not be confirmed. Refresh delivery status before trying anything again.') });
+            setRetry(value => value + 1);
+        } finally { setBusy(null); actionRef.current = false; }
+    };
     const dirty = text !== (lead.response_draft || '');
     return <div className="view-stack lead-detail">
         <div className="detail-navigation"><button className="back-link" onClick={onBack}><ArrowLeft size={16} /> All leads</button><span className="lead-reference">RECORD / {lead.lead_id.slice(0, 8)}</span></div>
@@ -106,10 +137,11 @@ export function LeadDetailView({ leadId, onBack, onRefreshLeads, revision, confi
             <AIAnalysisPanel lead={lead} busy={!!busy} onAnalyze={() => perform('analyze')} />
             <ResponseComposer lead={lead} text={text} editing={editing} dirty={dirty} reviewed={reviewed} busy={!!busy} onReview={setReviewed} onChange={value => { setText(value); dirtyRef.current = true; setReviewed(false); }} onEdit={() => { setEditing(true); setReviewed(false); }} onCancel={() => { setText(lead.response_draft || ''); dirtyRef.current = false; setEditing(false); setReviewed(false); }} onSave={() => perform('edit')} onApprove={() => perform('approve')} onReject={() => setModal('reject')} />
             <WhatsAppConsentPanel lead={lead} onSaved={updated => { setLead(updated); setNotice({ tone: 'success', text: 'Verified WhatsApp consent evidence recorded. No message was sent.' }); setRetry(value => value + 1); onRefreshLeads(); }} />
+            <WhatsAppDeliveryPanel lead={lead} messages={whatsappMessages} config={whatsappConfig} busy={busy === 'whatsapp-send'} onRequestSend={() => setModal('whatsapp')} onRefresh={refreshWhatsAppMessages} />
             <OutcomeTracker lead={lead} onSaved={updated => { setLead(updated); setRetry(value => value + 1); onRefreshLeads(); }} />
         </div><aside className="detail-side"><PolicyDecisionPanel lead={lead} config={config} clock={clock} nextFollowup={nextFollowup} followupsError={followupsError} busy={!!busy} onRescue={() => setModal('rescue')} /><div className="trust-footnote"><ShieldIcon /><p><strong>Policy is authoritative.</strong> Scores and risk come from the server. AI cannot bypass your approval or customer consent.</p></div></aside></div>
         <section className="panel lead-audit"><SectionHeader icon={History} title="A clear record of every action" subtitle="Actual events returned by the audit API"><span className="badge-sub">{auditError ? 'Unavailable' : `${audit.length}${auditCursor ? '+' : ''} events loaded`}</span></SectionHeader>{auditError ? <ErrorState title="Audit history is unavailable" onRetry={() => setRetry(value => value + 1)} /> : <><ActivityTimeline events={showAllEvents ? events : events.slice(0, 5)} />{events.length > 5 && <button className="btn-text" onClick={() => setShowAllEvents(value => !value)}>{showAllEvents ? 'Show recent events' : `Show all ${events.length} loaded events`}</button>}{auditCursor && <button type="button" className="btn-secondary" disabled={auditLoadingMore} onClick={loadMoreAudit}>{auditLoadingMore ? 'Loading…' : 'Load older events'}</button>}</>}</section>
-        {modal && <Modal title={modal === 'rescue' ? 'Review rescue action' : 'Reject this response?'} description={modal === 'rescue' ? 'The policy engine makes the final eligibility decision.' : 'The draft will be rejected. No external message will be sent.'} onClose={() => setModal(null)} busy={!!busy}><div className="view-stack">{modal === 'rescue' && <><div className="rescue-steps"><span>At-risk lead</span><span>Policy eligibility check</span><span>Priority follow-up</span><span>Human review</span></div><p>The server will schedule a rescue follow-up if this lead is eligible. This action does not send a message.</p></>}<div className="form-actions"><button className="btn-secondary" disabled={!!busy} onClick={() => setModal(null)}>Cancel</button><button className={modal === 'rescue' ? 'btn-rescue' : 'btn-primary'} disabled={!!busy} onClick={() => perform(modal)}>{busy ? <BusyLabel>Processing…</BusyLabel> : modal === 'rescue' ? <><LifeBuoy size={16} /> Rescue lead</> : 'Reject response'}</button></div></div></Modal>}
+        {modal && <Modal title={modal === 'rescue' ? 'Review rescue action' : modal === 'whatsapp' ? 'Send this WhatsApp response?' : 'Reject this response?'} description={modal === 'rescue' ? 'The policy engine makes the final eligibility decision.' : modal === 'whatsapp' ? 'This sends one template-based message to the current phone number. If Meta’s response is ambiguous, LeadRescue will not resend it automatically.' : 'The draft will be rejected. No external message will be sent.'} onClose={() => setModal(null)} busy={!!busy}><div className="view-stack">{modal === 'rescue' && <><div className="rescue-steps"><span>At-risk lead</span><span>Policy eligibility check</span><span>Priority follow-up</span><span>Human review</span></div><p>The server will schedule a rescue follow-up if this lead is eligible. This action does not send a message.</p></>}{modal === 'whatsapp' && <><p><strong>Recipient:</strong> {lead.customer_name} · {lead.customer_phone}</p><p><strong>Meta template:</strong> {whatsappConfig?.template_name} ({whatsappConfig?.template_language})</p><blockquote>{whatsappPreview || lead.response_draft}</blockquote><p className="form-note">The server verifies current consent, phone binding, suppression, privacy hold, and exact-draft approval again. This click is the separate send authorization.</p></>}<div className="form-actions"><button className="btn-secondary" disabled={!!busy} onClick={() => setModal(null)}>Cancel</button><button className={modal === 'rescue' ? 'btn-rescue' : 'btn-primary'} disabled={!!busy || (modal === 'whatsapp' && !whatsappConfig?.outbound_enabled)} onClick={() => modal === 'whatsapp' ? sendWhatsApp() : perform(modal)}>{busy ? <BusyLabel>Processing…</BusyLabel> : modal === 'rescue' ? <><LifeBuoy size={16} /> Rescue lead</> : modal === 'whatsapp' ? 'Send one WhatsApp attempt' : 'Reject response'}</button></div></div></Modal>}
     </div>;
 }
 function ShieldIcon() { return <CheckCircle2 size={19} />; }

@@ -8,6 +8,7 @@ from app.repositories.config import ConfigRepository
 from app.repositories.followups import FollowUpsRepository
 from app.repositories.leads import LeadsRepository
 from app.repositories.privacy_requests import PrivacyRequestsRepository
+from app.repositories.whatsapp_messages import repository as _whatsapp_messages_repo
 
 # Singleton repository instances
 _leads_repo = LeadsRepository()
@@ -35,3 +36,7 @@ def get_config_repo() -> ConfigRepository:
 
 def get_privacy_requests_repo() -> PrivacyRequestsRepository:
     return _privacy_requests_repo
+
+
+def get_whatsapp_messages_repo():
+    return _whatsapp_messages_repo

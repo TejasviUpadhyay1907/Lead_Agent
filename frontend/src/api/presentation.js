@@ -34,6 +34,7 @@ export function auditLayer(actor) {
     return 'policy';
 }
 export function safeError(error, fallback = 'The request could not be completed. Please try again.') {
+    if (error?.detail && [400, 409, 422, 503].includes(error.status)) return error.detail;
     if (error?.status === 404) return 'This record was not found. Refresh the list and try again.';
     if (error?.status === 409) return 'The record changed or this action is no longer allowed. Refresh before trying again.';
     if (error?.status === 403) return 'The server has blocked this action. Check the current safeguards and permissions.';

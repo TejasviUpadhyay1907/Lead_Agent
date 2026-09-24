@@ -49,7 +49,7 @@ export function WhatsAppConsentPanel({ lead, onSaved }) {
                 ? 'This contact is suppressed. Consent cannot override an opt-out.'
                 : lead.privacy_hold
                     ? 'Consent changes are paused while this privacy request is reviewed.'
-                    : 'Do not infer permission from a phone number or inquiry. Record only explicit WhatsApp permission you verified in the referenced source. Provider delivery is not connected.'}
+                    : 'Do not infer permission from a phone number or inquiry. Record only explicit WhatsApp permission you verified in the referenced source. Permission is only one prerequisite; sending also requires a separate human action and an enabled Meta configuration.'}
         </Notice>
         {lead.whatsapp_consent && <div className="consent-evidence">
             <span><strong>Source</strong>{lead.whatsapp_consent.source.replaceAll('_', ' ')}</span>

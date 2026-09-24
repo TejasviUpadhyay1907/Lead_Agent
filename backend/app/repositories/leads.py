@@ -116,6 +116,34 @@ class LeadsRepository:
             ) from exc
         return False
 
+    def record_whatsapp_phone_opt_out(self, phone_e164: str, provider_message_id: str) -> str:
+        """Durably suppress a WhatsApp sender even when no local lead exists yet."""
+        self._ensure_suppressions_ready()
+        phone_key = customer_index_keys(settings.effective_tenant_id, None, phone_e164).get("tenant_phone_key")
+        if not phone_key:
+            raise SuppressionRegistryUnavailableError("Customer phone key could not be derived")
+        suppression_key = f"phone#{phone_key}"
+        item = {
+            "suppression_key": suppression_key,
+            "tenant_id": settings.effective_tenant_id,
+            "lead_id": "whatsapp-inbound-opt-out",
+            "reason": "customer_opt_out",
+            "source": "whatsapp_inbound",
+            "provider_event_id": provider_message_id,
+            "suppressed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if self.use_memory or not self._suppressions_table:
+            self._memory_suppressions.add(suppression_key)
+            return phone_key
+        try:
+            self._suppressions_table.put_item(Item=item, ConditionExpression=Attr("suppression_key").not_exists())
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise SuppressionRegistryUnavailableError("Customer opt-out could not be recorded") from exc
+        except Exception as exc:
+            raise SuppressionRegistryUnavailableError("Customer opt-out could not be recorded") from exc
+        return phone_key
+
     def customer_opted_out_many(self, leads: Sequence[Lead]) -> set[str]:
         """Return opted-out lead IDs with bounded, strongly consistent reads.
 

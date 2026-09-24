@@ -264,7 +264,7 @@ export function DashboardView({
                                 <SectionHeader
                                     icon={UserCheck}
                                     title="Human approval"
-                                    subtitle="Approval records review; delivery is not configured"
+                                    subtitle="Approval and WhatsApp delivery are separate audited actions"
                                     layer="human"
                                 >
                                     <span className="badge-sub">{pending} pending approval · {leads.filter(isAwaitingDelivery).length} approved, not delivered</span>

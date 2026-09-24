@@ -19,8 +19,14 @@ async function request(endpoint, options = {}, withMetadata = false) {
         });
         if (!response.ok) {
             if (response.status === 401) window.dispatchEvent(new Event('leadrescue-auth-expired'));
-            const error = new Error(`Request failed (${response.status})`);
+            let detail;
+            try {
+                const payload = await response.clone().json();
+                if (typeof payload?.detail === 'string') detail = payload.detail;
+            } catch { /* Keep a generic safe message for non-JSON responses. */ }
+            const error = new Error(detail || `Request failed (${response.status})`);
             error.status = response.status;
+            error.detail = detail;
             throw error;
         }
         if (response.status === 204) return null;
@@ -159,6 +165,12 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify(consent),
     }),
+    getWhatsAppMessages: id => request(`/leads/${encodeURIComponent(id)}/whatsapp-messages`),
+    sendWhatsAppMessage: (id, templateFingerprint) => request(`/leads/${encodeURIComponent(id)}/whatsapp-messages`, {
+        method: 'POST',
+        body: JSON.stringify({ send_confirmed: true, template_fingerprint: templateFingerprint }),
+    }),
+    getWhatsAppConfiguration: () => request('/whatsapp/configuration'),
 
     rescueLead: (id) => request(`/leads/${id}/rescue`, {
         method: 'POST',

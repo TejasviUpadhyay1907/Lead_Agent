@@ -114,6 +114,6 @@ export default function App() {
             {route.view === 'settings' && <SettingsView onRefreshData={refreshData} clock={data.clock} demoMode={demoMode} />}
             {route.view === 'privacy' && <PrivacyRequestsView onSelectLead={selectLead} />}
         </>}
-        <footer className="page-footer"><span>LeadRescue AI <span className="footer-divider">/</span> Lead intelligence, human control.</span><span>{demoMode ? 'Synthetic workspace · All sends are simulated' : 'Company workspace · Message delivery is not connected'}</span></footer>
+        <footer className="page-footer"><span>LeadRescue AI <span className="footer-divider">/</span> Lead intelligence, human control.</span><span>{demoMode ? 'Synthetic workspace · External messaging is disabled' : 'Company workspace · Messaging requires tenant enablement'}</span></footer>
     </main></div></div>;
 }

@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     analysis_dlq_arn: str = ""
     webhook_secret_arn: str = ""
     zoho_webhook_secret_arn: str = ""
+    whatsapp_secret_arn: str = ""
+    whatsapp_outbound_enabled: bool = False
+    whatsapp_messages_table: str = "leadrescue-whatsapp-messages"
     customer_index_secret_arn: str = ""
 
     # Application mode

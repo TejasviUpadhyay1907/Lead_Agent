@@ -5,6 +5,7 @@ Endpoints for lead creation, listing, detailed retrieval, AI analysis, response 
 
 import json
 import hashlib
+import hmac
 import re
 from decimal import Decimal
 from typing import List, Optional
@@ -14,13 +15,14 @@ import boto3
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
 from app.agent.lead_agent import LeadRescueAgent
-from app.api.deps import get_audit_repo, get_config_repo, get_followups_repo, get_leads_repo, get_privacy_requests_repo
+from app.api.deps import get_audit_repo, get_config_repo, get_followups_repo, get_leads_repo, get_privacy_requests_repo, get_whatsapp_messages_repo
 from app.api.security import require_roles
 from app.config.settings import settings
 from app.models.audit import AuditEventCreate
 from app.models.enums import FollowUpStatusEnum, LifecycleStatusEnum, PriorityEnum, ResponseStatusEnum, RiskStatusEnum, SalesOutcomeEnum, SourceEnum, WhatsAppConsentSourceEnum
 from app.models.followup import FollowUp, FollowUpCreate
 from app.models.lead import Lead, LeadCreate, WhatsAppConsent
+from app.models.whatsapp_message import WhatsAppDeliveryStatus, WhatsAppMessage
 from app.models.privacy_request import PrivacyRequest
 from app.policy.engine import PolicyEngine
 from app.policy.risk import evaluate_risk
@@ -29,10 +31,12 @@ from app.repositories.config import ConfigRepository
 from app.repositories.followups import FollowUpsRepository
 from app.repositories.leads import ConcurrentLeadUpdateError, LeadsRepository
 from app.repositories.privacy_requests import PrivacyRequestsRepository
+from app.repositories.whatsapp_messages import WhatsAppMessagesRepository
 from app.repositories.analysis_jobs import repository as analysis_jobs_repo
 from app.repositories.customer_index import CustomerIndexKeyUnavailableError, customer_index_keys
 from app.utils.time import effective_now
 from app.policy.guardrails import check_opt_out, detect_privacy_request
+from app.integrations.whatsapp import WhatsAppConfigurationError, load_config as load_whatsapp_config, send_approved_template, template_fingerprint
 
 router = APIRouter(prefix="/leads", tags=["Leads"])
 
@@ -93,6 +97,13 @@ class WhatsAppConsentRequest(BaseModel):
         if value > datetime.now(timezone.utc) + timedelta(minutes=5):
             raise ValueError("Consent timestamp cannot be in the future")
         return value
+
+
+class WhatsAppSendRequest(BaseModel):
+    send_confirmed: StrictBool
+    template_fingerprint: str = Field(..., pattern=r"^[a-f0-9]{64}$")
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class AnalysisJobResponse(BaseModel):
@@ -524,8 +535,7 @@ def process_response_action(
         lead.response_draft = draft_text
 
     if req.action == "approve":
-        # Approval records human authorization only. There is no delivery
-        # provider configured, so lifecycle and SLA risk remain unchanged.
+        # Approval is separate from delivery; only a later, explicit provider action may send.
         lead.response_status = ResponseStatusEnum.APPROVED
         lead.approved_draft_sha256 = hashlib.sha256(lead.response_draft.encode("utf-8")).hexdigest()
         lead.approval_attested_at = effective_now().astimezone(timezone.utc).isoformat()
@@ -542,7 +552,7 @@ def process_response_action(
                     "claims_verified": True,
                     "approved_draft_sha256": lead.approved_draft_sha256,
                     "approval_attested_at": lead.approval_attested_at,
-                    "delivery_status": "not_configured",
+                    "delivery_status": "not_attempted",
                 },
             ),
         )
@@ -676,6 +686,196 @@ def record_whatsapp_consent(
         return leads_repo.save_with_audits(lead, [audit], audit_repo, expected_updated_at)
     except ConcurrentLeadUpdateError as exc:
         raise HTTPException(status_code=409, detail="This lead changed while consent was being recorded. Refresh before retrying.") from exc
+
+
+@router.post("/{lead_id}/whatsapp-messages", response_model=WhatsAppMessage, status_code=status.HTTP_202_ACCEPTED)
+def send_whatsapp_message(
+    lead_id: str,
+    req: WhatsAppSendRequest,
+    _operator=Depends(require_roles(settings.operator_role, settings.admin_role)),
+    leads_repo: LeadsRepository = Depends(get_leads_repo),
+    audit_repo: AuditRepository = Depends(get_audit_repo),
+    messages_repo: WhatsAppMessagesRepository = Depends(get_whatsapp_messages_repo),
+):
+    """Attempt one approved Meta template send; replaying the same approval never sends twice."""
+    if settings.demo_enabled or not settings.whatsapp_outbound_enabled:
+        raise HTTPException(status_code=503, detail="WhatsApp outbound delivery is disabled for this deployment")
+    if not req.send_confirmed:
+        raise HTTPException(status_code=400, detail="Confirm the exact message preview before sending")
+    try:
+        provider_config = load_whatsapp_config()
+    except WhatsAppConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not hmac.compare_digest(req.template_fingerprint, template_fingerprint(provider_config)):
+        raise HTTPException(status_code=409, detail="The approved template changed. Refresh the preview before confirming send")
+
+    lead = leads_repo.get_by_id(lead_id)
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    if lead.privacy_hold:
+        raise HTTPException(status_code=409, detail="Messaging is paused while a privacy request is reviewed")
+    if lead.lifecycle_status in {LifecycleStatusEnum.OPTED_OUT, LifecycleStatusEnum.RESOLVED}:
+        raise HTTPException(status_code=409, detail="This lead is not eligible for outreach")
+    if leads_repo.customer_opted_out(lead):
+        raise HTTPException(status_code=409, detail="Customer opt-out is terminal and blocks WhatsApp outreach")
+    if not lead.customer_phone or not re.fullmatch(r"\+[1-9]\d{7,14}", lead.customer_phone.strip()):
+        raise HTTPException(status_code=409, detail="A valid E.164 WhatsApp number is required")
+    if not lead.response_draft or lead.response_status != ResponseStatusEnum.APPROVED:
+        raise HTTPException(status_code=409, detail="A human-approved response draft is required")
+    draft_hash = hashlib.sha256(lead.response_draft.encode("utf-8")).hexdigest()
+    template_body_hash = hashlib.sha256(provider_config.template_body.encode("utf-8")).hexdigest()
+    rendered_message = provider_config.template_body.replace("{{1}}", lead.response_draft)
+    if len(lead.response_draft) > 1024 or len(rendered_message) > 1024:
+        raise HTTPException(status_code=422, detail="The approved response exceeds the pilot template's supported length")
+    rendered_message_hash = hashlib.sha256(rendered_message.encode("utf-8")).hexdigest()
+    if (
+        not lead.approved_draft_sha256
+        or not hmac.compare_digest(lead.approved_draft_sha256, draft_hash)
+        or not lead.approval_attested_at
+        or not lead.approval_attested_by
+    ):
+        raise HTTPException(status_code=409, detail="The approval does not match the current response draft")
+    consent = lead.whatsapp_consent
+    if not consent or consent.status != "granted":
+        raise HTTPException(status_code=409, detail="Verified WhatsApp permission is required")
+    try:
+        current_phone_key = customer_index_keys(settings.effective_tenant_id, None, lead.customer_phone)["tenant_phone_key"]
+    except CustomerIndexKeyUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="Customer identity key is unavailable") from exc
+    if not current_phone_key or not hmac.compare_digest(consent.recipient_phone_key, current_phone_key):
+        raise HTTPException(status_code=409, detail="Consent was recorded for a different phone number")
+
+    # Deterministic per approval/evidence/template fingerprint: concurrent requests and
+    # client retries converge on one permanent attempt record and one external request.
+    identity = "|".join((
+        settings.effective_tenant_id, lead_id, draft_hash, lead.approval_attested_at,
+        consent.evidence_ref, current_phone_key, provider_config.template_name, provider_config.template_language,
+        template_body_hash, provider_config.phone_number_id,
+        rendered_message_hash, provider_config.api_version,
+        req.template_fingerprint,
+    ))
+    message_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    message = WhatsAppMessage(
+        message_id=message_id,
+        lead_id=lead_id,
+        status=WhatsAppDeliveryStatus.SUBMITTING,
+        initiated_by=_operator["sub"],
+        approved_draft_sha256=draft_hash,
+        approval_attested_at=lead.approval_attested_at,
+        template_body_sha256=template_body_hash,
+        template_fingerprint=req.template_fingerprint,
+        rendered_message_sha256=rendered_message_hash,
+        rendered_message=rendered_message,
+        consent_evidence_ref=consent.evidence_ref,
+        recipient_phone_key=current_phone_key,
+        template_name=provider_config.template_name,
+        template_language=provider_config.template_language,
+        provider_api_version=provider_config.api_version,
+    )
+    audit = audit_repo.build(AuditEventCreate(
+        lead_id=lead_id,
+        action="whatsapp_send_attempt_started",
+        actor=f"user:{_operator['sub']}",
+        details={
+            "message_id": message_id,
+            "draft_sha256": draft_hash,
+            "consent_evidence_ref": consent.evidence_ref,
+            "template_name": provider_config.template_name,
+            "template_language": provider_config.template_language,
+            "template_body_sha256": template_body_hash,
+            "template_fingerprint": req.template_fingerprint,
+            "rendered_message_sha256": rendered_message_hash,
+        },
+    ))
+    try:
+        message, created = messages_repo.create_attempt(message, audit, audit_repo)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Message attempt could not be durably recorded") from exc
+    if not created:
+        return message
+
+    # Re-read the mutable lead and suppression registry after the attempt record
+    # is durable and immediately before the one external request.
+    try:
+        fresh = leads_repo.get_by_id(lead_id)
+        fresh_config = load_whatsapp_config()
+        fresh_phone_key = (
+            customer_index_keys(settings.effective_tenant_id, None, fresh.customer_phone)["tenant_phone_key"]
+            if fresh and fresh.customer_phone else None
+        )
+        fresh_draft_hash = hashlib.sha256(fresh.response_draft.encode("utf-8")).hexdigest() if fresh and fresh.response_draft else None
+        still_eligible = bool(
+            fresh
+            and not settings.demo_enabled
+            and settings.whatsapp_outbound_enabled
+            and not fresh.privacy_hold
+            and fresh.lifecycle_status not in {LifecycleStatusEnum.OPTED_OUT, LifecycleStatusEnum.RESOLVED}
+            and not leads_repo.customer_opted_out(fresh)
+            and fresh.response_status == ResponseStatusEnum.APPROVED
+            and fresh.approval_attested_at == message.approval_attested_at
+            and fresh_draft_hash == message.approved_draft_sha256
+            and fresh.approved_draft_sha256 == message.approved_draft_sha256
+            and fresh.whatsapp_consent is not None
+            and fresh.whatsapp_consent.evidence_ref == message.consent_evidence_ref
+            and fresh_phone_key
+            and hmac.compare_digest(fresh_phone_key, message.recipient_phone_key)
+            and hmac.compare_digest(fresh.whatsapp_consent.recipient_phone_key, fresh_phone_key)
+            and fresh_config.template_name == message.template_name
+            and fresh_config.template_language == message.template_language
+            and fresh_config.api_version == message.provider_api_version
+            and hashlib.sha256(fresh_config.template_body.encode("utf-8")).hexdigest() == message.template_body_sha256
+            and fresh_config.phone_number_id == provider_config.phone_number_id
+            and hmac.compare_digest(template_fingerprint(fresh_config), message.template_fingerprint)
+        )
+        if still_eligible:
+            try:
+                result = send_approved_template(fresh_config, fresh.customer_phone, fresh.response_draft, message_id)
+            except Exception:
+                # Once the provider call may have started, every unexpected exception is ambiguous.
+                result = WhatsAppSendResult("unknown", error_code="transport_or_response_ambiguous")
+        else:
+            result = WhatsAppSendResult("failed", error_code="preflight_changed")
+    except Exception:
+        # A failed final gate is never converted into permission to send.
+        result = WhatsAppSendResult("failed", error_code="safety_check_unavailable")
+    normalized = {
+        "accepted": WhatsAppDeliveryStatus.ACCEPTED,
+        "failed": WhatsAppDeliveryStatus.FAILED,
+        "unknown": WhatsAppDeliveryStatus.UNKNOWN,
+    }[result.outcome]
+    result_audit = audit_repo.build(AuditEventCreate(
+        lead_id=lead_id,
+        action="whatsapp_send_provider_result",
+        actor="provider:meta_whatsapp",
+        details={
+            "message_id": message_id,
+            "status": normalized.value,
+            "provider_message_id": result.provider_message_id,
+            "error_code": result.error_code,
+        },
+    ))
+    try:
+        return messages_repo.apply_api_result(
+            message_id, normalized, result_audit, audit_repo,
+            provider_message_id=result.provider_message_id,
+            error_code=result.error_code,
+        )
+    except Exception as exc:
+        # The durable SUBMITTING record prevents a repeat send. Provider webhook correlation
+        # can still reconcile an accepted message after an API-side persistence failure.
+        raise HTTPException(status_code=503, detail="Provider outcome is being reconciled; do not retry with a new approval") from exc
+
+
+@router.get("/{lead_id}/whatsapp-messages", response_model=List[WhatsAppMessage])
+def list_whatsapp_messages(
+    lead_id: str,
+    _operator=Depends(require_roles(settings.operator_role, settings.admin_role)),
+    leads_repo: LeadsRepository = Depends(get_leads_repo),
+    messages_repo: WhatsAppMessagesRepository = Depends(get_whatsapp_messages_repo),
+):
+    if not leads_repo.get_by_id(lead_id):
+        raise HTTPException(status_code=404, detail="Lead not found")
+    return messages_repo.list_for_lead(lead_id)
 
 
 @router.post("/{lead_id}/rescue")

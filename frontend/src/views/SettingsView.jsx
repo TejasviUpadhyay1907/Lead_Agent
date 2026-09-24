@@ -326,7 +326,7 @@ export function SettingsView({ onRefreshData, clock, demoMode = false }) {
                 <ul className="design-list">
                     <li><strong>AI understands</strong> — extracts intent and context and drafts a reply.</li>
                     <li><strong>Software decides</strong> — the deterministic policy engine owns score, priority, SLA and safeguards.</li>
-                    <li><strong>Human approves</strong> — approval is recorded for review; no customer message is delivered because no outbound provider is configured.</li>
+                    <li><strong>Human approves</strong> — approval records an exact draft version. Delivery requires a separate operator action and is deployment-gated.</li>
                 </ul>
             </section>
         </div>

@@ -10,7 +10,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 
-from app.api.deps import get_audit_repo, get_followups_repo, get_leads_repo, get_privacy_requests_repo
+from app.api.deps import get_audit_repo, get_followups_repo, get_leads_repo, get_privacy_requests_repo, get_whatsapp_messages_repo
 from app.api.security import require_roles
 from app.config.settings import settings
 from app.models.audit import AuditEventCreate
@@ -26,6 +26,7 @@ from app.repositories.privacy_requests import (
     ConcurrentPrivacyRequestUpdateError,
     PrivacyRequestsRepository,
 )
+from app.repositories.whatsapp_messages import WhatsAppMessagesRepository
 
 router = APIRouter(prefix="/privacy", tags=["Privacy"])
 
@@ -202,6 +203,7 @@ def export_lead_data(
     leads_repo: LeadsRepository = Depends(get_leads_repo),
     followups_repo: FollowUpsRepository = Depends(get_followups_repo),
     audit_repo: AuditRepository = Depends(get_audit_repo),
+    whatsapp_repo: WhatsAppMessagesRepository = Depends(get_whatsapp_messages_repo),
 ):
     """Return one tenant-scoped lead record with all related follow-ups and audit pages."""
     lead = leads_repo.get_by_id(lead_id)
@@ -215,6 +217,8 @@ def export_lead_data(
         followups.extend(page)
         if cursor is None:
             break
+
+    whatsapp_messages = whatsapp_repo.all_for_lead(lead_id)
 
     events = []
     cursor = None
@@ -230,7 +234,7 @@ def export_lead_data(
             lead_id=lead_id,
             action="lead_data_exported",
             actor=f"user:{operator['sub']}",
-            details={"followup_count": len(followups), "audit_event_count": len(events)},
+            details={"followup_count": len(followups), "audit_event_count": len(events), "whatsapp_message_count": len(whatsapp_messages)},
         )
     )
     payload = {
@@ -240,6 +244,7 @@ def export_lead_data(
         "lead": lead.model_dump(mode="json"),
         "followups": [item.model_dump(mode="json") for item in followups],
         "audit_events": [item.model_dump(mode="json") for item in [*events, export_event]],
+        "whatsapp_messages": [item.model_dump(mode="json") for item in whatsapp_messages],
     }
     safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", lead_id)[:80] or "record"
     return Response(
