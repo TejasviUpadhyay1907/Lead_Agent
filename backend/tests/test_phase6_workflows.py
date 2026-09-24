@@ -9,6 +9,9 @@ Tests complete operational workflow:
 - End-to-End Rahul Sharma, Sunita Rao, and Deepak Verma workflow verification
 """
 
+import hashlib
+from datetime import datetime, timezone
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -120,6 +123,9 @@ def test_rahul_sharma_end_to_end_workflow():
     responded = resp_res.json()
     assert responded["response_status"] == "approved"
     assert responded["lifecycle_status"] == get_res_2.json()["lifecycle_status"]
+    assert responded["approved_draft_sha256"] == hashlib.sha256(responded["response_draft"].encode()).hexdigest()
+    assert responded["approval_attested_at"]
+    assert responded["approval_attested_by"]
     
     # 17-18. Approval does not deliver the message or satisfy the response SLA.
     assert responded["risk_status"] == "at_risk"
@@ -252,6 +258,22 @@ def test_response_edit_and_reject_workflows():
     assert edited["response_draft"] == "Custom edited response draft for Priya."
     assert edited["response_status"] == "draft"
 
+    approved = client.put(
+        f"/api/leads/{lead_id}/response",
+        json={"action": "approve", "claims_verified": True},
+    )
+    assert approved.status_code == 200
+    assert approved.json()["approved_draft_sha256"]
+
+    revised = client.put(
+        f"/api/leads/{lead_id}/response",
+        json={"action": "edit", "edited_draft": "Revised draft for Priya."},
+    )
+    assert revised.status_code == 200
+    assert revised.json()["approved_draft_sha256"] is None
+    assert revised.json()["approval_attested_at"] is None
+    assert revised.json()["approval_attested_by"] is None
+
     # Reject Draft
     reject_res = client.put(
         f"/api/leads/{lead_id}/response",
@@ -261,6 +283,109 @@ def test_response_edit_and_reject_workflows():
     rejected = reject_res.json()
     assert rejected["response_status"] == "rejected"
     assert rejected["lifecycle_status"] != "contacted"
+
+
+def test_whatsapp_consent_is_evidence_backed_idempotent_and_phone_bound():
+    create_res = client.post(
+        "/api/leads",
+        json={
+            "customer_name": "Asha Rao",
+            "customer_phone": "+919876543210",
+            "source": "website",
+            "raw_message": "Please send me the catalog.",
+        },
+    )
+    assert create_res.status_code == 201
+    lead_id = create_res.json()["lead_id"]
+    payload = {
+        "consented_at": datetime.now(timezone.utc).isoformat(),
+        "source": "website_form",
+        "evidence_ref": "form-submission-2468",
+        "text_version": "whatsapp-opt-in-v1",
+        "explicit_permission_verified": True,
+    }
+
+    response = client.put(f"/api/leads/{lead_id}/whatsapp-consent", json=payload)
+    assert response.status_code == 200
+    consent = response.json()["whatsapp_consent"]
+    assert consent["status"] == "granted"
+    assert consent["recipient_phone_key"]
+    assert "+919876543210" not in consent["recipient_phone_key"]
+
+    initial_audit = client.get(f"/api/leads/{lead_id}/audit").json()
+    repeated = client.put(f"/api/leads/{lead_id}/whatsapp-consent", json=payload)
+    assert repeated.status_code == 200
+    repeated_audit = client.get(f"/api/leads/{lead_id}/audit").json()
+    assert len(repeated_audit) == len(initial_audit)
+    assert [item["action"] for item in repeated_audit].count("whatsapp_consent_recorded") == 1
+    conflicting_replay = client.put(
+        f"/api/leads/{lead_id}/whatsapp-consent",
+        json={**payload, "text_version": "different-version"},
+    )
+    assert conflicting_replay.status_code == 409
+
+
+def test_whatsapp_consent_rejects_missing_attestation_opt_out_and_non_e164_phone():
+    no_phone = client.post("/api/leads", json={
+        "customer_name": "No Phone",
+        "source": "website",
+        "raw_message": "Please send information.",
+    }).json()["lead_id"]
+    no_phone_result = client.put(f"/api/leads/{no_phone}/whatsapp-consent", json={
+        "consented_at": datetime.now(timezone.utc).isoformat(),
+        "source": "website_form",
+        "evidence_ref": "form-1",
+        "text_version": "v1",
+        "explicit_permission_verified": True,
+    })
+    assert no_phone_result.status_code == 422
+
+    opted_out = client.post("/api/leads", json={
+        "customer_name": "Opted Out",
+        "customer_phone": "+919876543211",
+        "source": "website",
+        "raw_message": "Please remove me from your list.",
+    }).json()["lead_id"]
+    opted_out_result = client.put(f"/api/leads/{opted_out}/whatsapp-consent", json={
+        "consented_at": datetime.now(timezone.utc).isoformat(),
+        "source": "website_form",
+        "evidence_ref": "form-2",
+        "text_version": "v1",
+        "explicit_permission_verified": True,
+    })
+    assert opted_out_result.status_code == 409
+
+    unverified = client.post("/api/leads", json={
+        "customer_name": "Unverified",
+        "customer_phone": "+919876543212",
+        "source": "website",
+        "raw_message": "Please send information.",
+    }).json()["lead_id"]
+    unverified_result = client.put(f"/api/leads/{unverified}/whatsapp-consent", json={
+        "consented_at": datetime.now(timezone.utc).isoformat(),
+        "source": "website_form",
+        "evidence_ref": "form-3",
+        "text_version": "v1",
+        "explicit_permission_verified": False,
+    })
+    assert unverified_result.status_code == 400
+
+    resolved = client.post("/api/leads", json={
+        "customer_name": "Resolved Lead",
+        "customer_phone": "+919876543213",
+        "source": "website",
+        "raw_message": "Please send information.",
+    }).json()["lead_id"]
+    resolved_status = client.put(f"/api/leads/{resolved}/status", json={"lifecycle_status": "resolved"})
+    assert resolved_status.status_code == 200
+    resolved_consent = client.put(f"/api/leads/{resolved}/whatsapp-consent", json={
+        "consented_at": datetime.now(timezone.utc).isoformat(),
+        "source": "website_form",
+        "evidence_ref": "form-4",
+        "text_version": "v1",
+        "explicit_permission_verified": True,
+    })
+    assert resolved_consent.status_code == 409
 
 
 def test_followup_update_api():

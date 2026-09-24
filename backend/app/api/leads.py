@@ -4,10 +4,11 @@ Endpoints for lead creation, listing, detailed retrieval, AI analysis, response 
 """
 
 import json
+import hashlib
 import re
 from decimal import Decimal
 from typing import List, Optional
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 import boto3
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
@@ -17,9 +18,9 @@ from app.api.deps import get_audit_repo, get_config_repo, get_followups_repo, ge
 from app.api.security import require_roles
 from app.config.settings import settings
 from app.models.audit import AuditEventCreate
-from app.models.enums import FollowUpStatusEnum, LifecycleStatusEnum, PriorityEnum, ResponseStatusEnum, RiskStatusEnum, SalesOutcomeEnum, SourceEnum
+from app.models.enums import FollowUpStatusEnum, LifecycleStatusEnum, PriorityEnum, ResponseStatusEnum, RiskStatusEnum, SalesOutcomeEnum, SourceEnum, WhatsAppConsentSourceEnum
 from app.models.followup import FollowUp, FollowUpCreate
-from app.models.lead import Lead, LeadCreate
+from app.models.lead import Lead, LeadCreate, WhatsAppConsent
 from app.models.privacy_request import PrivacyRequest
 from app.policy.engine import PolicyEngine
 from app.policy.risk import evaluate_risk
@@ -29,6 +30,7 @@ from app.repositories.followups import FollowUpsRepository
 from app.repositories.leads import ConcurrentLeadUpdateError, LeadsRepository
 from app.repositories.privacy_requests import PrivacyRequestsRepository
 from app.repositories.analysis_jobs import repository as analysis_jobs_repo
+from app.repositories.customer_index import CustomerIndexKeyUnavailableError, customer_index_keys
 from app.utils.time import effective_now
 from app.policy.guardrails import check_opt_out, detect_privacy_request
 
@@ -72,6 +74,25 @@ class SalesOutcomeRequest(BaseModel):
         if self.sales_value is not None and self.outcome != SalesOutcomeEnum.WON:
             raise ValueError("Sales value can only be recorded for a won outcome")
         return self
+
+
+class WhatsAppConsentRequest(BaseModel):
+    consented_at: datetime
+    source: WhatsAppConsentSourceEnum
+    evidence_ref: str = Field(..., min_length=1, max_length=256, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
+    text_version: str = Field(..., min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    explicit_permission_verified: StrictBool
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("consented_at")
+    @classmethod
+    def require_aware_past_timestamp(cls, value):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Consent timestamp must include a timezone")
+        if value > datetime.now(timezone.utc) + timedelta(minutes=5):
+            raise ValueError("Consent timestamp cannot be in the future")
+        return value
 
 
 class AnalysisJobResponse(BaseModel):
@@ -489,9 +510,11 @@ def process_response_action(
                     status_code=status.HTTP_409_CONFLICT,
                     detail="Edit the approved draft before approving a changed version.",
                 )
-            business_rules = config_repo.get_config("business_rules").config_value
-            lead.risk_status, lead.at_risk_at = evaluate_risk(lead, business_rules)
-            return lead
+            candidate_hash = hashlib.sha256(candidate_draft.encode("utf-8")).hexdigest()
+            if lead.approved_draft_sha256 == candidate_hash and lead.approval_attested_by and lead.approval_attested_at:
+                business_rules = config_repo.get_config("business_rules").config_value
+                lead.risk_status, lead.at_risk_at = evaluate_risk(lead, business_rules)
+                return lead
     elif req.action == "edit" and (not draft_text or not draft_text.strip()):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -504,6 +527,9 @@ def process_response_action(
         # Approval records human authorization only. There is no delivery
         # provider configured, so lifecycle and SLA risk remain unchanged.
         lead.response_status = ResponseStatusEnum.APPROVED
+        lead.approved_draft_sha256 = hashlib.sha256(lead.response_draft.encode("utf-8")).hexdigest()
+        lead.approval_attested_at = effective_now().astimezone(timezone.utc).isoformat()
+        lead.approval_attested_by = actor_id
         business_rules = config_repo.get_config("business_rules").config_value
         lead.risk_status, lead.at_risk_at = evaluate_risk(lead, business_rules)
         return commit_action(
@@ -511,12 +537,21 @@ def process_response_action(
                 lead_id=lead_id,
                 action="response_approved",
                 actor=f"user:{actor_id}",
-                details={"action": "approve", "claims_verified": True, "delivery_status": "not_configured"},
+                details={
+                    "action": "approve",
+                    "claims_verified": True,
+                    "approved_draft_sha256": lead.approved_draft_sha256,
+                    "approval_attested_at": lead.approval_attested_at,
+                    "delivery_status": "not_configured",
+                },
             ),
         )
 
     elif req.action == "edit":
         lead.response_status = ResponseStatusEnum.DRAFT
+        lead.approved_draft_sha256 = None
+        lead.approval_attested_at = None
+        lead.approval_attested_by = None
         return commit_action(
             AuditEventCreate(
                 lead_id=lead_id,
@@ -528,6 +563,9 @@ def process_response_action(
 
     elif req.action == "reject":
         lead.response_status = ResponseStatusEnum.REJECTED
+        lead.approved_draft_sha256 = None
+        lead.approval_attested_at = None
+        lead.approval_attested_by = None
         return commit_action(
             AuditEventCreate(
                 lead_id=lead_id,
@@ -568,6 +606,76 @@ def respond_to_lead_alias(
     Backwards-compatible alias for response approval workflow.
     """
     return process_response_action(lead_id, req, leads_repo, audit_repo, config_repo, _operator["sub"])
+
+
+@router.put("/{lead_id}/whatsapp-consent", response_model=Lead)
+def record_whatsapp_consent(
+    lead_id: str,
+    req: WhatsAppConsentRequest,
+    _operator=Depends(require_roles(settings.operator_role, settings.admin_role)),
+    leads_repo: LeadsRepository = Depends(get_leads_repo),
+    audit_repo: AuditRepository = Depends(get_audit_repo),
+):
+    """Record an operator-verified, evidence-backed opt-in for the current WhatsApp number."""
+    lead = leads_repo.get_by_id(lead_id)
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    if lead.privacy_hold:
+        raise HTTPException(status_code=409, detail="Consent cannot be recorded while a privacy request is pending")
+    if lead.lifecycle_status == LifecycleStatusEnum.RESOLVED:
+        raise HTTPException(status_code=409, detail="Consent cannot be added to a resolved lead")
+    if lead.lifecycle_status == LifecycleStatusEnum.OPTED_OUT or leads_repo.customer_opted_out(lead):
+        raise HTTPException(status_code=409, detail="Customer opt-out is terminal and cannot be overridden")
+    if not req.explicit_permission_verified:
+        raise HTTPException(status_code=400, detail="Verify explicit WhatsApp permission against the referenced evidence")
+    if not lead.customer_phone or not re.fullmatch(r"\+[1-9]\d{7,14}", lead.customer_phone.strip()):
+        raise HTTPException(status_code=422, detail="A valid E.164 WhatsApp number is required before recording consent")
+
+    try:
+        phone_key = customer_index_keys(settings.effective_tenant_id, None, lead.customer_phone)["tenant_phone_key"]
+    except CustomerIndexKeyUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="Customer identity key is unavailable") from exc
+    if not phone_key:
+        raise HTTPException(status_code=503, detail="Customer identity key is unavailable")
+    consented_at = req.consented_at.astimezone(timezone.utc).isoformat()
+    existing = lead.whatsapp_consent
+    if existing and existing.evidence_ref == req.evidence_ref:
+        if (
+            existing.consented_at == consented_at
+            and existing.source == req.source
+            and existing.text_version == req.text_version
+            and existing.recipient_phone_key == phone_key
+        ):
+            return lead
+        raise HTTPException(status_code=409, detail="This consent evidence reference is already recorded with different details")
+
+    expected_updated_at = lead.updated_at
+    lead.whatsapp_consent = WhatsAppConsent(
+        consented_at=consented_at,
+        recorded_at=datetime.now(timezone.utc).isoformat(),
+        source=req.source,
+        evidence_ref=req.evidence_ref,
+        text_version=req.text_version,
+        recipient_phone_key=phone_key,
+        recorded_by=_operator["sub"],
+    )
+    audit = audit_repo.build(AuditEventCreate(
+        lead_id=lead_id,
+        action="whatsapp_consent_recorded",
+        actor=f"user:{_operator['sub']}",
+        details={
+            "channel": "whatsapp",
+            "consented_at": consented_at,
+            "source": req.source.value,
+            "evidence_ref": req.evidence_ref,
+            "text_version": req.text_version,
+            "recipient_phone_key": phone_key,
+        },
+    ))
+    try:
+        return leads_repo.save_with_audits(lead, [audit], audit_repo, expected_updated_at)
+    except ConcurrentLeadUpdateError as exc:
+        raise HTTPException(status_code=409, detail="This lead changed while consent was being recorded. Refresh before retrying.") from exc
 
 
 @router.post("/{lead_id}/rescue")

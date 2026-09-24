@@ -2,7 +2,7 @@
 
 ## Current continuation checkpoint (2026-09-24)
 
-Latest code at this checkpoint adds a Zoho CRM create-event intake endpoint with a separate optional Secrets Manager credential and permanent record-ID deduplication. This remains an unverified connector implementation: no Zoho sandbox, record-edit synchronization, OAuth lifecycle, CRM writeback, WhatsApp delivery, or staging deployment has been proven. The first integration candidate remains Zoho CRM + Meta WhatsApp Business Platform for an India-based SMB, subject to design-partner confirmation. Market readiness remains pre-staging/pre-pilot.
+Latest code at this checkpoint adds a Zoho CRM create-event intake endpoint with a separate optional Secrets Manager credential and permanent record-ID deduplication. It also records operator-verified WhatsApp consent evidence bound to the current phone and an immutable hash of the approved draft. These are application-level safeguards, not live-vendor verification. No Zoho sandbox, record-edit synchronization, OAuth lifecycle, CRM writeback, WhatsApp delivery/receipts, or staging deployment has been proven. The first integration candidate remains Zoho CRM + Meta WhatsApp Business Platform for an India-based SMB, subject to design-partner confirmation. Market readiness remains pre-staging/pre-pilot.
 
 ## Assessment
 

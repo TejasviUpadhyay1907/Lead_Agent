@@ -6,7 +6,7 @@ Strict Pydantic model for Lead records according to Phase 0 Revision 3.
 import uuid
 from decimal import Decimal
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Literal
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from app.config.settings import settings
 
@@ -20,6 +20,7 @@ from app.models.enums import (
     SalesOutcomeEnum,
     SourceEnum,
     UrgencyEnum,
+    WhatsAppConsentSourceEnum,
 )
 
 
@@ -52,6 +53,21 @@ class LeadUpdate(BaseModel):
     response_status: Optional[ResponseStatusEnum] = None
     last_analysis_job_id: Optional[str] = None
     response_draft: Optional[str] = None
+    model_config = ConfigDict(extra="forbid")
+
+
+class WhatsAppConsent(BaseModel):
+    """Evidence pointer for affirmative WhatsApp permission, bound to one phone identity."""
+
+    status: Literal["granted"] = "granted"
+    consented_at: str
+    recorded_at: str
+    source: WhatsAppConsentSourceEnum
+    evidence_ref: str = Field(..., min_length=1, max_length=256, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
+    text_version: str = Field(..., min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    recipient_phone_key: str = Field(..., min_length=1, max_length=256)
+    recorded_by: str = Field(..., min_length=1, max_length=256)
+
     model_config = ConfigDict(extra="forbid")
 
 
@@ -88,6 +104,11 @@ class Lead(LeadBase):
 
     # Response Status (Human Approval Workflow)
     response_status: Optional[ResponseStatusEnum] = None
+    # Claim review is bound to the exact draft so a sender can reject stale approval.
+    approved_draft_sha256: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    approval_attested_at: Optional[str] = None
+    approval_attested_by: Optional[str] = None
+    whatsapp_consent: Optional[WhatsAppConsent] = None
     # Sales outcome is entered by an operator or later synchronized from a CRM.
     # It is never inferred from model output or lifecycle status.
     sales_outcome: Optional[SalesOutcomeEnum] = None

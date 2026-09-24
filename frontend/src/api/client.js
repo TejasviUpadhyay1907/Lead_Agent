@@ -155,6 +155,11 @@ export const api = {
         body: JSON.stringify({ action, edited_draft: editedDraft, claims_verified: claimsVerified }),
     }),
 
+    recordWhatsAppConsent: (id, consent) => request(`/leads/${encodeURIComponent(id)}/whatsapp-consent`, {
+        method: 'PUT',
+        body: JSON.stringify(consent),
+    }),
+
     rescueLead: (id) => request(`/leads/${id}/rescue`, {
         method: 'POST',
     }),

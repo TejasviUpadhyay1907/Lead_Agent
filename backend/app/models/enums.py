@@ -65,6 +65,14 @@ class SalesOutcomeEnum(str, Enum):
     DISQUALIFIED = "disqualified"
 
 
+class WhatsAppConsentSourceEnum(str, Enum):
+    WEBSITE_FORM = "website_form"
+    ZOHO_CRM = "zoho_crm"
+    INBOUND_WHATSAPP = "inbound_whatsapp"
+    SIGNED_DOCUMENT = "signed_document"
+    OTHER_VERIFIED_RECORD = "other_verified_record"
+
+
 class FollowUpStatusEnum(str, Enum):
     SCHEDULED = "scheduled"
     COMPLETED = "completed"
