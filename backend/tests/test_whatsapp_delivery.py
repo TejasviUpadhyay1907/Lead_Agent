@@ -213,9 +213,63 @@ def test_signed_meta_status_webhook_updates_once_and_stop_suppresses_phone(monke
     )
     assert replay.status_code == 200
     assert len(audit.list_by_lead(lead_id)) == audit_count
+
+    mismatched_identity = json.loads(raw)
+    mismatched_identity["entry"][0]["changes"][0]["value"]["statuses"][0].update(
+        {"id": "wamid.different-message", "status": "read", "timestamp": "1780000010"}
+    )
+    mismatched_raw = json.dumps(mismatched_identity, separators=(",", ":")).encode()
+    mismatched_signature = "sha256=" + hmac.new(
+        config.app_secret.encode(), mismatched_raw, hashlib.sha256
+    ).hexdigest()
+    mismatched = client.post(
+        "/integrations/v1/whatsapp/webhook",
+        content=mismatched_raw,
+        headers={"X-Hub-Signature-256": mismatched_signature, "Content-Type": "application/json"},
+    )
+    assert mismatched.status_code == 200
+    assert mismatched.json()["correlated"] == 0
+    assert messages.get(message_id).provider_message_id == "wamid.webhook-test"
+    assert messages.get(message_id).status == WhatsAppDeliveryStatus.DELIVERED
     suppressed = _verified_lead("wa-stop-check")
     suppressed.customer_phone = "+14155552673"
     assert leads.customer_opted_out(suppressed)
+
+
+def test_provider_status_lifecycle_never_regresses_after_delivery(sending_context):
+    _leads, audit, messages, lead = sending_context
+    message_id = hashlib.sha256(b"monotonic-status-test").hexdigest()
+    message = WhatsAppMessage(
+        message_id=message_id,
+        lead_id=lead.lead_id,
+        status=WhatsAppDeliveryStatus.SUBMITTING,
+        initiated_by="pilot-operator",
+        approved_draft_sha256="a" * 64,
+        approval_attested_at=datetime.now(timezone.utc).isoformat(),
+        template_body_sha256="b" * 64,
+        template_fingerprint="c" * 64,
+        rendered_message_sha256="d" * 64,
+        rendered_message="Approved text.",
+        consent_evidence_ref="form-monotonic-test",
+        recipient_phone_key="demo#phone-key",
+        template_name="leadrescue_reply",
+        template_language="en",
+        provider_api_version="v23.0",
+    )
+    messages.create_attempt(message, audit.build(AuditEventCreate(
+        lead_id=lead.lead_id, action="whatsapp_send_attempt_started", actor="user:pilot-operator",
+    )), audit)
+
+    delivered = messages.apply_provider_status(message_id, "delivered", "wamid.monotonic", 200, audit)
+    read = messages.apply_provider_status(message_id, "read", "wamid.monotonic", 300, audit)
+    stale_delivery = messages.apply_provider_status(message_id, "delivered", "wamid.monotonic", 400, audit)
+    late_failure = messages.apply_provider_status(message_id, "failed", "wamid.monotonic", 500, audit)
+
+    assert delivered.status == WhatsAppDeliveryStatus.DELIVERED
+    assert read.status == WhatsAppDeliveryStatus.READ
+    assert stale_delivery.status == WhatsAppDeliveryStatus.READ
+    assert late_failure.status == WhatsAppDeliveryStatus.READ
+    assert late_failure.provider_status_at == 300
 
 
 def test_meta_webhook_rejects_invalid_signature(monkeypatch):

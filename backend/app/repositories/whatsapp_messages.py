@@ -13,6 +13,17 @@ from app.repositories.base import get_boto3_dynamodb_resource
 
 _serializer = TypeSerializer()
 _STATUS_RANK = {"sent": 1, "delivered": 2, "read": 3, "failed": 4}
+_STATUS_TRANSITIONS = {
+    # Provider callbacks are monotonic: stale/intermediate receipts cannot
+    # overwrite a later delivery state, and terminal states cannot regress.
+    "submitting": {"sent", "delivered", "read", "failed"},
+    "accepted": {"sent", "delivered", "read", "failed"},
+    "unknown": {"sent", "delivered", "read", "failed"},
+    "sent": {"sent", "delivered", "read", "failed"},
+    "delivered": {"delivered", "read"},
+    "read": {"read"},
+    "failed": {"failed"},
+}
 
 
 def _av(value):
@@ -197,6 +208,8 @@ class WhatsAppMessagesRepository:
         current = self.get(message_id)
         if not current:
             return None
+        if provider_status not in _STATUS_TRANSITIONS.get(current.status.value, set()):
+            return current
         if current.provider_status_at is not None and (
             event_timestamp < current.provider_status_at
             or (event_timestamp == current.provider_status_at and rank <= current.provider_status_rank)
@@ -220,6 +233,8 @@ class WhatsAppMessagesRepository:
             latest = self._memory.get(message_id)
             if not latest:
                 return None
+            if provider_status not in _STATUS_TRANSITIONS.get(latest.status.value, set()):
+                return latest.model_copy(deep=True)
             if latest.provider_status_at is not None and (
                 event_timestamp < latest.provider_status_at
                 or (event_timestamp == latest.provider_status_at and rank <= latest.provider_status_rank)
@@ -237,10 +252,19 @@ class WhatsAppMessagesRepository:
             audit_repo.store(audit)
             return latest.model_copy(deep=True)
 
-        condition = "tenant_id = :tenant AND (attribute_not_exists(provider_status_at) OR provider_status_at < :event_at OR (provider_status_at = :event_at AND provider_status_rank < :rank))"
+        allowed_previous = sorted(
+            status for status, transitions in _STATUS_TRANSITIONS.items() if provider_status in transitions
+        )
+        allowed_placeholders = [f":previous_{index}" for index in range(len(allowed_previous))]
+        condition = (
+            "tenant_id = :tenant AND #status IN (" + ", ".join(allowed_placeholders) + ") AND "
+            "(attribute_not_exists(provider_status_at) OR provider_status_at < :event_at "
+            "OR (provider_status_at = :event_at AND provider_status_rank < :rank))"
+        )
         values = {":tenant": settings.effective_tenant_id, ":event_at": event_timestamp, ":rank": rank,
                   ":status": normalized.value, ":provider_id": provider_message_id,
                   ":tenant_provider_id": f"{settings.effective_tenant_id}#{provider_message_id}", ":updated": updated_at}
+        values.update({placeholder: previous for placeholder, previous in zip(allowed_placeholders, allowed_previous)})
         update_expression = "SET #status = :status, provider_message_id = :provider_id, tenant_provider_message_id = :tenant_provider_id, provider_status_at = :event_at, provider_status_rank = :rank, updated_at = :updated"
         if error_code:
             update_expression += ", error_code = :error_code"

@@ -9,6 +9,11 @@
 - Tightened the signed Meta status callback path: if a callback references a known opaque attempt ID but carries a provider message ID different from the one already bound to that attempt, the callback is ignored for that attempt. This prevents a callback from rewriting an established provider identity. A first valid callback can still bind the provider ID when it arrives before the outbound API response is persisted.
 - Published as `049f47fbb081661b76bbb2de25683d7f89a792c9`. GitHub Quality Gates run [35986971922](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35986971922) and CodeQL run [35986971986](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35986971986) passed for this commit. No Meta sandbox callback was exercised, so provider behavior remains unproven.
 
+### Continuation update — 2026-09-24: monotonic WhatsApp delivery state
+
+- Added an explicit receipt transition policy: provider timestamps still reject stale events, but a later timestamp cannot move a delivered/read message backward; `read` and `failed` do not transition to other states. DynamoDB's conditional update now enforces both the timestamp and allowed prior-state set, so concurrent callbacks cannot bypass the rule. The signed webhook path also has regression coverage for mismatched provider IDs.
+- Focused WhatsApp suite passes **6 tests**; the full backend suite passes **179 tests** (two upstream/cache warnings). These are local simulated-repository tests; the DynamoDB race condition expression and Meta callback ordering have not been exercised against AWS/Meta.
+
 ## Executive assessment
 
 LeadRescue AI is a technically substantial, pre-pilot prototype for rescuing inbound sales leads. It is designed to receive and triage leads, calculate deterministic priority and risk, generate a response draft, and let a human decide what happens. Its strongest architectural decision is: **AI understands; deterministic software decides; humans approve.**
