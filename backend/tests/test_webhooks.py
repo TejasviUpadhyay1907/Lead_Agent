@@ -40,6 +40,14 @@ def test_verify_signature_accepts_exact_signed_bytes(monkeypatch):
     )
 
 
+def test_zoho_webhook_token_uses_constant_time_secret_comparison(monkeypatch):
+    monkeypatch.setattr(webhooks, "_get_zoho_webhook_secret", lambda: "t" * 40)
+    webhooks._verify_zoho_token("t" * 40)
+    with pytest.raises(HTTPException) as exc:
+        webhooks._verify_zoho_token("x" * 40)
+    assert exc.value.status_code == 401
+
+
 @pytest.mark.parametrize(
     "timestamp,provider,event_id,signature,expected_status",
     [
@@ -151,6 +159,61 @@ def test_ingest_verifies_and_maps_valid_request(monkeypatch):
     assert persisted["privacy_request"] is None
 
 
+def test_zoho_ingest_authenticates_maps_and_uses_permanent_record_dedupe(monkeypatch):
+    body = json.dumps({
+        "record_id": "5725767000000123456",
+        "customer_name": "Asha Rao",
+        "customer_email": "asha@example.com",
+        "customer_phone": "+91-9000000000",
+        "source": "website",
+        "message": "Please send a quote for 20 units.",
+    }).encode()
+    monkeypatch.setattr(webhooks, "_verify_zoho_token", lambda token: None)
+    persisted = {}
+
+    def record_persistence(*args, **kwargs):
+        persisted["args"] = args
+        persisted["kwargs"] = kwargs
+        return webhooks.JSONResponse(status_code=201, content={"accepted": True, "duplicate": False, "lead_id": args[0].lead_id})
+
+    monkeypatch.setattr(webhooks, "_create_or_return_duplicate", record_persistence)
+    response = TestClient(app).post(
+        "/integrations/v1/zoho/leads",
+        content=body,
+        headers={"Content-Type": "application/json", "X-LeadRescue-Token": "test-token"},
+    )
+
+    assert response.status_code == 201
+    lead, audit, event_key, provider, event_digest, payload_digest, _privacy = persisted["args"]
+    assert lead.customer_name == "Asha Rao"
+    assert lead.raw_message == "Please send a quote for 20 units."
+    assert provider == "zoho-crm"
+    assert event_key.endswith(event_digest)
+    assert audit.actor == "integration:zoho-crm"
+    assert payload_digest == hashlib.sha256(webhooks.InboundLead(
+        customer_name="Asha Rao",
+        customer_email="asha@example.com",
+        customer_phone="+91-9000000000",
+        source="website",
+        message="Please send a quote for 20 units.",
+    ).model_dump_json().encode()).hexdigest()
+    assert persisted["kwargs"] == {"permanent_idempotency": True}
+
+
+def test_zoho_ingest_rejects_auth_and_incomplete_mapped_records(monkeypatch):
+    monkeypatch.setattr(webhooks, "_verify_zoho_token", lambda _token: (_ for _ in ()).throw(HTTPException(status_code=401)))
+    client = TestClient(app)
+    bad_auth = client.post("/integrations/v1/zoho/leads", json={"record_id": "123"})
+    assert bad_auth.status_code == 401
+
+    monkeypatch.setattr(webhooks, "_verify_zoho_token", lambda _token: None)
+    incomplete = client.post(
+        "/integrations/v1/zoho/leads",
+        json={"record_id": "123", "customer_name": "Asha", "source": "website", "message": ""},
+    )
+    assert incomplete.status_code == 422
+
+
 class _FakeTable:
     def __init__(self, name):
         self.name = name
@@ -216,6 +279,28 @@ def test_persistence_commits_lead_audit_and_dedupe_marker_together(monkeypatch):
     assert len(fake.transact_items) == 3
     assert {next(iter(item)) for item in fake.transact_items} == {"Put"}
     assert [item["Put"]["TableName"] for item in fake.transact_items] == ["test-leads", "test-audit", "test-events"]
+
+
+def test_permanent_external_record_marker_does_not_expire(monkeypatch):
+    fake = _FakeDynamo()
+    _patch_fake_dynamo(monkeypatch, fake)
+    lead = Lead(customer_name="Asha Rao", source="website", raw_message="Need a quote", tenant_id="tenant-test")
+    audit = AuditEvent(lead_id=lead.lead_id, tenant_id="tenant-test", tenant_lead_id=f"tenant-test#{lead.lead_id}", action="lead_received", actor="integration:zoho-crm")
+
+    response = webhooks._create_or_return_duplicate(
+        lead,
+        audit,
+        "tenant-test#external-record",
+        "zoho-crm",
+        "event-digest",
+        "payload-digest",
+        permanent_idempotency=True,
+    )
+
+    marker = fake.transact_items[2]["Put"]["Item"]
+    assert response.status_code == 201
+    assert marker["provider"]["S"] == "zoho-crm"
+    assert "expires_at" not in marker
 
 
 @pytest.mark.parametrize(

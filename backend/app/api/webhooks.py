@@ -39,12 +39,32 @@ router = APIRouter(prefix="/integrations/v1", tags=["Integrations"])
 _serializer = TypeSerializer()
 _secret_value: Optional[str] = None
 _secret_expires_at = 0.0
+_zoho_secret_value: Optional[str] = None
+_zoho_secret_expires_at = 0.0
 _MAX_CLOCK_SKEW_SECONDS = 300
 _MAX_BODY_BYTES = 256_000
 _IDEMPOTENCY_TTL_SECONDS = 60 * 60 * 24 * 30
 
 
 class InboundLead(BaseModel):
+    customer_name: str = Field(min_length=1, max_length=200)
+    customer_email: Optional[EmailStr] = None
+    customer_phone: Optional[str] = Field(default=None, max_length=64)
+    source: SourceEnum
+    message: str = Field(min_length=1, max_length=20000)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("customer_name", "message", mode="before")
+    @classmethod
+    def trim_required_text(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+class ZohoLeadWebhook(BaseModel):
+    """Explicit field-mapped Zoho Leads create event; configure the CRM webhook to this shape."""
+
+    record_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
     customer_name: str = Field(min_length=1, max_length=200)
     customer_email: Optional[EmailStr] = None
     customer_phone: Optional[str] = Field(default=None, max_length=64)
@@ -86,6 +106,41 @@ def _get_webhook_secret() -> str:
     except Exception as exc:
         logger.exception("Unable to read inbound webhook secret")
         raise HTTPException(status_code=503, detail="Inbound webhook integration is unavailable") from exc
+
+
+def _get_zoho_webhook_secret() -> str:
+    global _zoho_secret_value, _zoho_secret_expires_at
+    if not settings.zoho_webhook_secret_arn:
+        raise HTTPException(status_code=503, detail="Zoho CRM webhook integration is not configured")
+    if _zoho_secret_value and time.monotonic() < _zoho_secret_expires_at:
+        return _zoho_secret_value
+    try:
+        client = boto3.client("secretsmanager", region_name=settings.aws_region or None)
+        response = client.get_secret_value(SecretId=settings.zoho_webhook_secret_arn)
+        value = response.get("SecretString")
+        if not value:
+            raise ValueError("Configured Zoho webhook secret has no SecretString")
+        try:
+            decoded = json.loads(value)
+            value = decoded.get("token", value) if isinstance(decoded, dict) else value
+        except json.JSONDecodeError:
+            pass
+        if not isinstance(value, str) or len(value) < 32:
+            raise ValueError("Configured Zoho webhook token must contain at least 32 characters")
+        _zoho_secret_value = value
+        _zoho_secret_expires_at = time.monotonic() + 60
+        return value
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Unable to read Zoho webhook secret")
+        raise HTTPException(status_code=503, detail="Zoho CRM webhook integration is unavailable") from exc
+
+
+def _verify_zoho_token(token: str) -> None:
+    configured = _get_zoho_webhook_secret()
+    if not token or not hmac.compare_digest(configured, token):
+        raise HTTPException(status_code=401, detail="Invalid Zoho webhook credential")
 
 
 def _verify_signature(body: bytes, timestamp: str, provider: str, event_id: str, signature: str) -> None:
@@ -159,6 +214,8 @@ def _create_or_return_duplicate(
     idempotency_digest: str,
     payload_digest: str,
     privacy_request: Optional[PrivacyRequest] = None,
+    *,
+    permanent_idempotency: bool = False,
 ) -> JSONResponse:
     dynamodb = get_boto3_dynamodb_resource()
     if not dynamodb:
@@ -198,8 +255,9 @@ def _create_or_return_duplicate(
         "lead_id": lead.lead_id,
         "status": "COMPLETED",
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "expires_at": int(time.time()) + _IDEMPOTENCY_TTL_SECONDS,
     }
+    if not permanent_idempotency:
+        marker["expires_at"] = int(time.time()) + _IDEMPOTENCY_TTL_SECONDS
     client = dynamodb.meta.client
     try:
         client.transact_write_items(
@@ -333,4 +391,82 @@ async def ingest_lead(
         idempotency_digest,
         payload_digest,
         privacy_record,
+    )
+
+
+@router.post("/zoho/leads", summary="Receive a field-mapped Zoho CRM lead creation")
+async def ingest_zoho_lead(
+    request: Request,
+    zoho_token: str = Header(default="", alias="X-LeadRescue-Token"),
+):
+    """Accept Zoho create events only; repeated record IDs never create another local lead."""
+    body = await _read_bounded_body(request)
+    await run_in_threadpool(_verify_zoho_token, zoho_token)
+    try:
+        payload = ZohoLeadWebhook.model_validate_json(body)
+    except ValidationError as exc:
+        errors = [{"loc": item["loc"], "msg": item["msg"], "type": item["type"]} for item in exc.errors()]
+        raise HTTPException(status_code=422, detail=errors) from exc
+
+    # Zoho workflow rules must trigger only when a Lead is created. The permanent
+    # record marker prevents delayed/replayed creates from returning after TTL expiry.
+    provider = "zoho-crm"
+    event_id = payload.record_id
+    idempotency_digest = hashlib.sha256(f"{provider}:{event_id}".encode()).hexdigest()
+    normalized_payload = InboundLead(
+        customer_name=payload.customer_name,
+        customer_email=payload.customer_email,
+        customer_phone=payload.customer_phone,
+        source=payload.source,
+        message=payload.message,
+    )
+    canonical_payload = normalized_payload.model_dump_json().encode("utf-8")
+    payload_digest = hashlib.sha256(canonical_payload).hexdigest()
+    event_key = f"{settings.effective_tenant_id}#{idempotency_digest}"
+    lead = Lead(
+        customer_name=normalized_payload.customer_name,
+        customer_email=normalized_payload.customer_email,
+        customer_phone=normalized_payload.customer_phone,
+        source=normalized_payload.source,
+        raw_message=normalized_payload.message,
+    )
+    privacy_request = detect_privacy_request(normalized_payload.message)
+    privacy_record = PrivacyRequest(
+        lead_id=lead.lead_id,
+        request_type=privacy_request,
+        source=f"integration:{provider}",
+    ) if privacy_request else None
+    lead.privacy_hold = bool(privacy_request)
+    opted_out, _ = check_opt_out(normalized_payload.message)
+    if opted_out or privacy_request == "erasure":
+        lead.lifecycle_status = LifecycleStatusEnum.OPTED_OUT
+
+    audit = AuditEvent(
+        lead_id=lead.lead_id,
+        tenant_id=settings.effective_tenant_id,
+        tenant_lead_id=f"{settings.effective_tenant_id}#{lead.lead_id}",
+        action="lead_received",
+        actor=f"integration:{provider}",
+        details={
+            "source": normalized_payload.source.value,
+            "event_digest": idempotency_digest,
+            "lifecycle_status": lead.lifecycle_status.value,
+            **({
+                "privacy_request_type": privacy_request,
+                "privacy_request_status": "pending_admin_review",
+                "privacy_request_id": privacy_record.request_id,
+                "admin_action_required": True,
+            } if privacy_request else {}),
+        },
+    )
+    return await run_in_threadpool(
+        _create_or_return_duplicate,
+        lead,
+        audit,
+        event_key,
+        provider,
+        idempotency_digest,
+        payload_digest,
+        privacy_record,
+        permanent_idempotency=True,
     )

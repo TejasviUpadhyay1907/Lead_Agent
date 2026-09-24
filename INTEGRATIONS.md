@@ -81,6 +81,25 @@ This generic webhook is the first integration adapter. Vendor OAuth sync, source
 
 This is the current default for an India-based SMB pilot, subject to confirmation by the design partner. It is a working candidate, not a claim that either integration exists in the application. Zoho CRM exposes OAuth 2.0 delegated access and webhook configuration for record events; Zoho webhooks can send dynamic CRM fields and configured custom headers. See the [OAuth overview](https://www.zoho.com/crm/developer/docs/api/v8/oauth-overview.html) and [webhook configuration API](https://www.zoho.com/crm/developer/docs/api/v8/create-webhook.html). WhatsApp Business Platform provides a test/sandbox path and webhooks, while its [current messaging policy](https://whatsappbusiness.com/policy/) requires recipient permission, opt-out compliance, and approved templates to initiate conversations.
 
+### Zoho CRM lead-create intake (implemented; staging validation still required)
+
+`POST /integrations/v1/zoho/leads` accepts a strict mapped JSON body and a dedicated `X-LeadRescue-Token` header. Set `ZohoWebhookSecretArn` at deployment to a separate Secrets Manager secret containing a random token of at least 32 characters (plain secret string or JSON `{"token":"..."}`). Leave the parameter empty to disable this route; do not reuse the generic HMAC webhook secret. The Lambda role receives read access only to the configured Zoho secret. Rotate by updating the secret and account for the one-minute in-process cache before removing the old token.
+
+Configure a Zoho CRM webhook with method `POST`, raw JSON body, and a custom header named `X-LeadRescue-Token`. A representative mapping is:
+
+```json
+{
+  "record_id": "${!Leads.Id}",
+  "customer_name": "${!Leads.Full_Name}",
+  "customer_email": "${!Leads.Email}",
+  "customer_phone": "${!Leads.Phone}",
+  "source": "website",
+  "message": "${!Leads.Description}"
+}
+```
+
+Set the `source` value to one supported LeadRescue source for that workflow. Map `message` to a required field that contains the actual inquiry; do not use an invented placeholder, since that would mislead analysis and operators. Configure the Zoho workflow rule to trigger only when a lead is created. The API permanently deduplicates by tenant + Zoho record ID: identical retries return the original local lead, while a changed payload for the same ID returns `409` and never creates a second lead. This route ingests a new lead; it does not import updates to an existing Zoho lead, write changes back to Zoho, or provide OAuth-based connection management. Do not enable the route in production until the mapped webhook body, field escaping, secret rotation, retry behavior, and event behavior have been observed against the pilot's Zoho sandbox.
+
 ### Connector boundary to implement
 
 Do not point a Zoho webhook directly at `POST /integrations/v1/leads` and call that a Zoho integration. The current endpoint requires an HMAC signature over a fresh timestamp, provider, idempotency key, and exact raw body. Zoho's configurable webhook body/headers are not evidence that it can generate this signature scheme. Confirm delivery/auth behavior in a Zoho sandbox before selecting the transport. A dedicated Zoho adapter or narrowly scoped relay should:

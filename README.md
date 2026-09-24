@@ -159,7 +159,7 @@ The SAM template enables point-in-time recovery on lead, follow-up, audit, and c
 
 Before applying the migration, take/verify a DynamoDB backup or point-in-time recovery, pause writes to that deployment, wait for all tenant GSIs to report `ACTIVE`, and keep the API off until the backfill and smoke checks are complete. The migration is additive and can be re-run after an interrupted run.
 
-The first inbound integration adapter is a signed webhook for CRMs and form systems that support outbound webhooks. Configure `WebhookSecretArn` in SAM and follow [INTEGRATIONS.md](INTEGRATIONS.md) to sign events and handle retries. This does not provide CRM write-back or message delivery.
+Inbound integrations include a generic signed webhook and an optional Zoho CRM lead-create endpoint. For Zoho, configure a separate `ZohoWebhookSecretArn` and follow [INTEGRATIONS.md](INTEGRATIONS.md) to map fields and set a create-only workflow. The Zoho endpoint permanently deduplicates source record IDs; it does not sync edits, write back to CRM, or deliver messages. Validate the exact mapping and retry behavior in a Zoho sandbox before production use.
 
 Lead analysis in the browser uses the durable job endpoint (`POST /api/leads/{lead_id}/analysis-jobs`, with an `Idempotency-Key` header) and polls `GET /api/leads/analysis-jobs/{job_id}`. SQS retries failed worker deliveries and sends exhausted/crashed jobs to a dead-letter queue; the required alarm topic receives worker errors/throttles, queue delay, and dead-letter alarms. The older `POST /api/leads/{lead_id}/analyze` endpoint remains synchronous for compatibility; new integrations should use the job flow.
 

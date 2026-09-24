@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     analysis_queue_url: str = ""
     analysis_dlq_arn: str = ""
     webhook_secret_arn: str = ""
+    zoho_webhook_secret_arn: str = ""
     customer_index_secret_arn: str = ""
 
     # Application mode

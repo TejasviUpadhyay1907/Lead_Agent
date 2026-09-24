@@ -8,7 +8,7 @@ Globals:
   Api:
     Cors:
       AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
-      AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,Idempotency-Key'"
+      AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,Idempotency-Key,X-LeadRescue-Token'"
       AllowOrigin: !Sub "'${CorsOrigin}'"
   Function:
     Runtime: python3.12
@@ -57,6 +57,10 @@ Parameters:
   WebhookSecretArn:
     Type: String
     Description: ARN of the Secrets Manager secret holding the inbound webhook HMAC secret.
+  ZohoWebhookSecretArn:
+    Type: String
+    Default: ""
+    Description: Optional ARN of a separate Secrets Manager secret holding the Zoho webhook token; leave empty to disable Zoho intake.
   CustomerIndexSecretArn:
     Type: String
     Description: ARN of the Secrets Manager string secret holding this deployment's customer-index HMAC key.
@@ -94,6 +98,9 @@ Parameters:
     MinValue: 1
     MaxValue: 5000
     Description: API Gateway burst request capacity for this isolated customer API.
+
+Conditions:
+  HasZohoWebhookSecret: !Not [!Equals [!Ref ZohoWebhookSecretArn, ""]]
 
 Resources:
   AnalysisJobsDeadLetterQueue:
@@ -163,6 +170,7 @@ Resources:
           PRIVACY_REQUESTS_TABLE: !Ref PrivacyRequestsTable
           ANALYSIS_QUEUE_URL: !Ref AnalysisJobsQueue
           WEBHOOK_SECRET_ARN: !Ref WebhookSecretArn
+          ZOHO_WEBHOOK_SECRET_ARN: !Ref ZohoWebhookSecretArn
           CUSTOMER_INDEX_SECRET_ARN: !Ref CustomerIndexSecretArn
       Policies:
         # Grant only the operations used by the repositories and their indexes.
@@ -247,6 +255,13 @@ Resources:
               Action:
                 - secretsmanager:GetSecretValue
               Resource: !Ref WebhookSecretArn
+            - !If
+              - HasZohoWebhookSecret
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref ZohoWebhookSecretArn
+              - !Ref AWS::NoValue
         - Statement:
             - Effect: Allow
               Action:
