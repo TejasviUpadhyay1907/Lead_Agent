@@ -14,7 +14,8 @@ Do not describe it as production-ready, fully integrated with company data, auto
 
 ## Current repository snapshot (2026-09-24)
 
-- **Latest verified publication at this audit update:** local `main`, `origin/main`, and GitHub `main` are at `208f57c81e1dead174b007746aec5be358229b8a`, and the worktree is clean. The frontend design correction is commit `3885d41`; commit `208f57c` only cleans the added audit report formatting. GitHub Actions quality run [35963904533](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35963904533) and CodeQL run [35963904527](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35963904527) both passed on `208f57c`; GitHub's code-scanning API reports zero open alerts. This proves configured source checks, not cloud deployment or runtime behavior.
+- **Latest verified publication:** local `main`, `origin/main`, and GitHub `main` are at `1e1afa872cbc4d7df6fddd91164e50d037664419`, and the worktree is clean. The frontend design correction is commit `3885d41`. Quality run [35964122645](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35964122645) and CodeQL run [35964122531](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/35964122531) both passed on the latest commit; GitHub reports zero open code-scanning alerts. These are source checks, not proof of a cloud deployment or runtime behavior.
+- A read-only GitHub API check confirms `main` has no branch-protection rules. A read-only AWS STS probe found no usable AWS credentials in this local environment; this does not prove the company has no AWS account or staging stack.
 
 The entries below this snapshot include chronological history from earlier points in the review; use the latest verified publication and later continuation updates as current state.
 
