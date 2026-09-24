@@ -110,7 +110,7 @@ export function LeadDetailView({ leadId, onBack, onRefreshLeads, revision, confi
         if (actionRef.current || !lead || isBlocked(lead)) return;
         actionRef.current = true; setBusy('whatsapp-send'); setModal(null); setNotice(null);
         try {
-            const result = await api.sendWhatsAppMessage(leadId);
+            const result = await api.sendWhatsAppMessage(leadId, whatsappConfig?.template_fingerprint);
             setWhatsAppMessages(current => [result, ...current.filter(item => item.message_id !== result.message_id)]);
             const message = result.status === 'unknown' || result.status === 'submitting'
                 ? 'The provider outcome is uncertain. No automatic resend will occur; check the receipt or reconcile with Meta.'

@@ -698,7 +698,7 @@ def send_whatsapp_message(
     messages_repo: WhatsAppMessagesRepository = Depends(get_whatsapp_messages_repo),
 ):
     """Attempt one approved Meta template send; replaying the same approval never sends twice."""
-    if settings.demo_enabled or not settings.whatsapp_outbound_enabled:
+    if not settings.whatsapp_send_enabled:
         raise HTTPException(status_code=503, detail="WhatsApp outbound delivery is disabled for this deployment")
     if not req.send_confirmed:
         raise HTTPException(status_code=400, detail="Confirm the exact message preview before sending")
@@ -806,8 +806,7 @@ def send_whatsapp_message(
         fresh_draft_hash = hashlib.sha256(fresh.response_draft.encode("utf-8")).hexdigest() if fresh and fresh.response_draft else None
         still_eligible = bool(
             fresh
-            and not settings.demo_enabled
-            and settings.whatsapp_outbound_enabled
+            and settings.whatsapp_send_enabled
             and not fresh.privacy_hold
             and fresh.lifecycle_status not in {LifecycleStatusEnum.OPTED_OUT, LifecycleStatusEnum.RESOLVED}
             and not leads_repo.customer_opted_out(fresh)

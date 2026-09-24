@@ -31,7 +31,7 @@ def get_whatsapp_configuration(_operator=Depends(require_roles(settings.operator
         raise HTTPException(status_code=503, detail="WhatsApp provider configuration is unavailable") from exc
     return WhatsAppConfigurationView(
         configured=True,
-        outbound_enabled=settings.whatsapp_outbound_enabled and not settings.demo_enabled,
+        outbound_enabled=settings.whatsapp_send_enabled,
         template_name=config.template_name,
         template_language=config.template_language,
         template_body=config.template_body,

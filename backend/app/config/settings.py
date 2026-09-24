@@ -65,6 +65,14 @@ class Settings(BaseSettings):
     def demo_enabled(self) -> bool:
         return self.demo_mode and self.app_env.lower() in {"local", "test"}
 
+    @property
+    def whatsapp_send_enabled(self) -> bool:
+        return (
+            self.whatsapp_outbound_enabled
+            and not self.demo_enabled
+            and self.app_env.lower() in {"staging", "production"}
+        )
+
 
 # Singleton settings instance
 settings = Settings()

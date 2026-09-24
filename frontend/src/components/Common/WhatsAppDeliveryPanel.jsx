@@ -16,7 +16,7 @@ export function WhatsAppDeliveryPanel({ lead, messages, config, busy, onRequestS
         && latest.approved_draft_sha256 === lead.approved_draft_sha256
         && latest.approval_attested_at === lead.approval_attested_at);
     const canRequest = !busy && !isBlocked(lead) && consentMatches && approved
-        && config?.configured && config?.outbound_enabled && config?.template_body
+        && config?.configured && config?.outbound_enabled && config?.template_body && config?.template_fingerprint
         && (!sameApproval || !terminalOrAmbiguous.has(latest.status));
     const renderedPreview = config?.template_body?.replace('{{1}}', lead.response_draft || '');
 

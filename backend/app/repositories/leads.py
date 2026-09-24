@@ -5,6 +5,7 @@ Provides persistence operations for Lead records (DynamoDB & Memory fallback).
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+import hashlib
 import time
 from typing import Dict, List, Optional, Sequence
 from botocore.exceptions import ClientError
@@ -12,7 +13,7 @@ from boto3.dynamodb.types import TypeSerializer
 from boto3.dynamodb.conditions import Attr, Key
 from app.config.settings import settings
 from app.models.lead import Lead, LeadCreate, LeadUpdate
-from app.models.audit import AuditEvent
+from app.models.audit import AuditEvent, AuditEventCreate
 from app.models.followup import FollowUp
 from app.repositories.base import get_boto3_dynamodb_resource
 from app.repositories.pagination import decode_cursor, encode_cursor
@@ -116,7 +117,7 @@ class LeadsRepository:
             ) from exc
         return False
 
-    def record_whatsapp_phone_opt_out(self, phone_e164: str, provider_message_id: str) -> str:
+    def record_whatsapp_phone_opt_out(self, phone_e164: str, provider_message_id: str, event_timestamp: int, audit_repo) -> str:
         """Durably suppress a WhatsApp sender even when no local lead exists yet."""
         self._ensure_suppressions_ready()
         phone_key = customer_index_keys(settings.effective_tenant_id, None, phone_e164).get("tenant_phone_key")
@@ -134,14 +135,30 @@ class LeadsRepository:
         }
         if self.use_memory or not self._suppressions_table:
             self._memory_suppressions.add(suppression_key)
-            return phone_key
-        try:
-            self._suppressions_table.put_item(Item=item, ConditionExpression=Attr("suppression_key").not_exists())
-        except ClientError as exc:
-            if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+        else:
+            try:
+                self._suppressions_table.put_item(Item=item, ConditionExpression=Attr("suppression_key").not_exists())
+            except ClientError as exc:
+                if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                    raise SuppressionRegistryUnavailableError("Customer opt-out could not be recorded") from exc
+            except Exception as exc:
                 raise SuppressionRegistryUnavailableError("Customer opt-out could not be recorded") from exc
-        except Exception as exc:
-            raise SuppressionRegistryUnavailableError("Customer opt-out could not be recorded") from exc
+        # The suppression is global to the contact. Also link the inbound request
+        # to the bounded set of currently indexed leads without storing message text.
+        event_time = datetime.fromtimestamp(event_timestamp, timezone.utc).isoformat()
+        for lead in self.find_customer_history(customer_phone=phone_e164, limit=100):
+            event = audit_repo.build(AuditEventCreate(
+                lead_id=lead.lead_id,
+                action="whatsapp_opt_out_received",
+                actor="provider:meta_whatsapp",
+                details={"provider_event_id": provider_message_id, "phone_key": phone_key, "source": "inbound_whatsapp"},
+            )).model_copy(update={
+                "audit_id": hashlib.sha256(
+                    f"{settings.effective_tenant_id}:{lead.lead_id}:{provider_message_id}".encode("utf-8")
+                ).hexdigest(),
+                "timestamp": event_time,
+            })
+            audit_repo.store(event)
         return phone_key
 
     def customer_opted_out_many(self, leads: Sequence[Lead]) -> set[str]:

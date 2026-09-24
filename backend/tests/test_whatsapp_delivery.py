@@ -11,7 +11,7 @@ from app.api import leads as leads_api
 from app.api.deps import get_audit_repo, get_leads_repo, get_whatsapp_messages_repo
 from app.api.leads import WhatsAppSendRequest, send_whatsapp_message
 from app.config.settings import Settings, settings
-from app.integrations.whatsapp import WhatsAppConfig, WhatsAppSendResult
+from app.integrations.whatsapp import WhatsAppConfig, WhatsAppSendResult, template_fingerprint
 from app.main import app
 from app.models.audit import AuditEventCreate
 from app.models.enums import LifecycleStatusEnum, ResponseStatusEnum, WhatsAppConsentSourceEnum
@@ -73,6 +73,7 @@ def sending_context(monkeypatch):
     messages = WhatsAppMessagesRepository(use_memory=True)
     monkeypatch.setattr(Settings, "demo_enabled", property(lambda _self: False))
     monkeypatch.setattr(Settings, "effective_tenant_id", property(lambda _self: "demo"))
+    monkeypatch.setattr(settings, "app_env", "staging")
     monkeypatch.setattr(settings, "whatsapp_outbound_enabled", True)
     monkeypatch.setattr(settings, "whatsapp_secret_arn", "test-secret")
     monkeypatch.setattr(leads_api, "load_whatsapp_config", _config)
@@ -92,10 +93,10 @@ def test_whatsapp_send_is_one_attempt_per_approval_and_binds_rendered_template(s
     monkeypatch.setattr(leads_api, "send_approved_template", fake_send)
     operator = {"sub": "pilot-operator"}
     first = send_whatsapp_message(
-        lead.lead_id, WhatsAppSendRequest(send_confirmed=True), operator, leads, audit, messages,
+        lead.lead_id, WhatsAppSendRequest(send_confirmed=True, template_fingerprint=template_fingerprint(_config())), operator, leads, audit, messages,
     )
     replay = send_whatsapp_message(
-        lead.lead_id, WhatsAppSendRequest(send_confirmed=True), operator, leads, audit, messages,
+        lead.lead_id, WhatsAppSendRequest(send_confirmed=True, template_fingerprint=template_fingerprint(_config())), operator, leads, audit, messages,
     )
 
     assert first.status == WhatsAppDeliveryStatus.ACCEPTED
@@ -120,7 +121,7 @@ def test_whatsapp_send_fails_closed_for_phone_mismatch_and_does_not_call_provide
     monkeypatch.setattr(leads_api, "send_approved_template", fake_send)
     with pytest.raises(HTTPException) as error:
         send_whatsapp_message(
-            lead.lead_id, WhatsAppSendRequest(send_confirmed=True), {"sub": "pilot-operator"}, leads, audit, messages,
+            lead.lead_id, WhatsAppSendRequest(send_confirmed=True, template_fingerprint=template_fingerprint(_config())), {"sub": "pilot-operator"}, leads, audit, messages,
         )
 
     assert error.value.status_code == 409
@@ -137,7 +138,7 @@ def test_ambiguous_whatsapp_attempt_is_never_retried_for_the_same_approval(sendi
         return WhatsAppSendResult("unknown", error_code="transport_or_response_ambiguous")
 
     monkeypatch.setattr(leads_api, "send_approved_template", fake_send)
-    args = (lead.lead_id, WhatsAppSendRequest(send_confirmed=True), {"sub": "pilot-operator"}, leads, audit, messages)
+    args = (lead.lead_id, WhatsAppSendRequest(send_confirmed=True, template_fingerprint=template_fingerprint(_config())), {"sub": "pilot-operator"}, leads, audit, messages)
     first = send_whatsapp_message(*args)
     second = send_whatsapp_message(*args)
 
@@ -153,6 +154,9 @@ def test_signed_meta_status_webhook_updates_once_and_stop_suppresses_phone(monke
     messages = get_whatsapp_messages_repo()
     leads = get_leads_repo()
     audit = get_audit_repo()
+    opted_out_lead = _verified_lead("wa-inbound-stop-audit")
+    opted_out_lead.customer_phone = "+14155552673"
+    leads._memory_store[opted_out_lead.lead_id] = opted_out_lead
     message_id = hashlib.sha256(b"webhook-test").hexdigest()
     lead_id = "wa-webhook-test"
     message = WhatsAppMessage(
@@ -163,6 +167,7 @@ def test_signed_meta_status_webhook_updates_once_and_stop_suppresses_phone(monke
         approved_draft_sha256="a" * 64,
         approval_attested_at=datetime.now(timezone.utc).isoformat(),
         template_body_sha256="b" * 64,
+        template_fingerprint=template_fingerprint(config),
         rendered_message_sha256="c" * 64,
         rendered_message="Approved text.",
         consent_evidence_ref="form-webhook-test",
@@ -199,6 +204,7 @@ def test_signed_meta_status_webhook_updates_once_and_stop_suppresses_phone(monke
     assert response.status_code == 200
     assert response.json() == {"received": 2, "correlated": 1, "opt_outs_recorded": 1}
     assert messages.get(message_id).status == WhatsAppDeliveryStatus.DELIVERED
+    assert any(item.action == "whatsapp_opt_out_received" for item in audit.list_by_lead(opted_out_lead.lead_id))
     audit_count = len(audit.list_by_lead(lead_id))
     replay = client.post(
         "/integrations/v1/whatsapp/webhook",

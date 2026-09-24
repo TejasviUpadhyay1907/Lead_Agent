@@ -148,16 +148,21 @@ async def receive_meta_webhook(
                     continue
                 sender = inbound.get("from")
                 event_id = inbound.get("id")
+                try:
+                    inbound_timestamp = int(inbound.get("timestamp"))
+                except (TypeError, ValueError):
+                    continue
                 body = _inbound_message_text(inbound)
                 if (
                     not isinstance(sender, str) or not re.fullmatch(r"[1-9]\d{7,14}", sender)
                     or not isinstance(event_id, str) or not event_id or len(event_id) > 256
                     or not isinstance(body, str) or len(body) > 4096
+                    or inbound_timestamp <= 0 or inbound_timestamp > 4102444800
                 ):
                     continue
                 opted_out, _reason = check_opt_out(body)
                 opted_out = opted_out or re.sub(r"[^a-z0-9]", "", body.lower()) in _EXACT_OPT_OUT_WORDS
                 if opted_out:
-                    leads_repo.record_whatsapp_phone_opt_out(f"+{sender}", event_id)
+                    leads_repo.record_whatsapp_phone_opt_out(f"+{sender}", event_id, inbound_timestamp, audit_repo)
                     suppressed += 1
     return {"received": event_count, "correlated": processed, "opt_outs_recorded": suppressed}
