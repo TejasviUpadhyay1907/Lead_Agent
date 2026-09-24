@@ -4,6 +4,14 @@
 
 This repository is a credible prototype with a useful deterministic policy boundary, but it is not ready to sell as an industrial lead-management system. The existing architecture and UI demonstrate a workflow; they do not yet establish secure multi-company operation, reliable integrations, or production service levels. “Perfect” cannot be verified from source code alone: customer identity systems, CRM/communications credentials, deployment configuration, and operational ownership are not present in this workspace.
 
+## Competitive reality and product wedge (2026-09-24)
+
+Lead capture, scoring, follow-up automation, AI assistance, omnichannel engagement, and WhatsApp connectivity are already advertised capabilities of established CRM suites. For example, Zoho describes lead scoring, automated follow-ups, omnichannel engagement, and connecting with prospects over WhatsApp in its [lead-management overview](https://www.zoho.com/crm/lead-management/) and [CRM feature catalog](https://www.zoho.com/crm/features.html). These are vendor descriptions, not an independent feature or quality assessment. They are enough to reject “we have AI lead scoring and reply drafts” as a defensible differentiator by itself.
+
+The product hypothesis worth validating is narrower and outcome-led: **a CRM-adjacent lead-response operations layer that helps SMB sales teams find missed or at-risk inbound inquiries across their existing channels, coordinates a human-approved next action, and proves whether the lead was actually contacted and converted.** The repository has pieces of this workflow (signed inbound webhook, deterministic risk/priority, human approval, follow-up tracking), but lacks vendor sync and delivery receipts, conversion/outcome capture, measured ROI, and customer evidence. Treat the wedge as a hypothesis until sales users confirm the pain and a pilot measures it.
+
+The next integration should preserve the customer's CRM as the system of record and close one end-to-end loop: source event → safe deduplicated intake → triage → assigned human review → consent-checked provider delivery → provider receipt → CRM update → conversion and response-time reporting. Validate the first CRM/channel with a target customer before implementing a vendor-specific connector; do not position the generic webhook as a completed CRM integration.
+
 ## Confirmed gaps
 
 | Area | Current evidence | Required before selling |
