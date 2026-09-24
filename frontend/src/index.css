@@ -763,6 +763,12 @@ textarea {
 .lead-select-meta { display: flex; flex-wrap: wrap; gap: .4rem; color: var(--text-muted); font-size: .68rem; }
 .activity-trail { display: grid; gap: .55rem; }
 .intent-line { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; color: var(--text-muted); font-size: .68rem; }
+.outcome-panel { display: grid; gap: .8rem; }
+.outcome-form { display: grid; gap: .8rem; }
+.outcome-value-fields { display: grid; grid-template-columns: minmax(0,1.5fr) minmax(110px,.6fr); gap: .8rem; }
+.outcome-reason { min-height: 88px; resize: vertical; }
+.outcome-current { color: var(--text-muted); font-size: .76rem; }
+.outcome-current strong { color: var(--text-main); }
 .intent-label { color: #c7d2fe; font-weight: 700; }
 .attention-score { color: var(--text-main); font-family: var(--font-heading); font-size: .9rem; font-weight: 800; }
 .attention-score small,.score-number span { color: var(--text-muted); font-family: var(--font-sans); font-size: .65rem; font-weight: 500; }
@@ -813,6 +819,7 @@ textarea {
   .inbox-cards { display: grid; gap: .6rem; }
   .activity-layout { grid-template-columns: minmax(0,1fr); }
   .form-grid { grid-template-columns: minmax(0,1fr); }
+  .outcome-value-fields { grid-template-columns: minmax(0,1fr); }
   .safety-banner { align-items: flex-start; flex-wrap: wrap; }
   .safety-banner .opt-out-label { margin-left: 0; }
   .page-footer { flex-direction: column; gap: .3rem; }

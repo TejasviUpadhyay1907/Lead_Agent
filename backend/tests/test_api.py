@@ -119,3 +119,73 @@ def test_create_lead_invalid_payload():
     """Invalid payload rejected with 422 Unprocessable Entity."""
     res = client.post("/api/leads", json={"invalid_field": True})
     assert res.status_code == 422
+
+
+def test_sales_outcome_records_confirmed_value_and_audit_event():
+    created = client.post("/api/leads", json={
+        "customer_name": "Outcome Capture Contact",
+        "customer_email": "outcome-capture@example.com",
+        "source": "website",
+        "raw_message": "Please send product details.",
+    })
+    assert created.status_code == 201
+    lead_id = created.json()["lead_id"]
+
+    response = client.put(f"/api/leads/{lead_id}/outcome", json={
+        "outcome": "won",
+        "sales_value": "125000.50",
+        "sales_currency": "INR",
+        "reason": "Converted after a technical consultation.",
+    })
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["sales_outcome"] == "won"
+    assert data["sales_value"] == "125000.50"
+    assert data["sales_currency"] == "INR"
+    assert data["sales_outcome_reason"] == "Converted after a technical consultation."
+    assert data["sales_outcome_at"]
+    assert data["lifecycle_status"] == "resolved"
+
+    audit = client.get(f"/api/leads/{lead_id}/audit")
+    assert audit.status_code == 200
+    event = next(item for item in audit.json() if item["action"] == "sales_outcome_recorded")
+    assert event["details"]["source"] == "operator_entered"
+    assert event["details"]["sales_value"] == "125000.50"
+
+
+def test_sales_outcome_rejects_missing_loss_reason_and_unpaired_currency():
+    missing_reason = client.put("/api/leads/does-not-matter/outcome", json={"outcome": "lost"})
+    assert missing_reason.status_code == 422
+
+    unpaired_currency = client.put("/api/leads/does-not-matter/outcome", json={
+        "outcome": "won", "sales_currency": "INR",
+    })
+    assert unpaired_currency.status_code == 422
+
+    value_for_loss = client.put("/api/leads/does-not-matter/outcome", json={
+        "outcome": "lost", "reason": "Budget unavailable", "sales_value": "200", "sales_currency": "INR",
+    })
+    assert value_for_loss.status_code == 422
+
+
+def test_sales_outcome_respects_privacy_and_opt_out_guards():
+    privacy_lead = client.post("/api/leads", json={
+        "customer_name": "Privacy Outcome Contact",
+        "customer_email": "privacy-outcome@example.com",
+        "source": "website",
+        "raw_message": "I want a copy of my data.",
+    })
+    assert privacy_lead.status_code == 201
+    held = client.put(f"/api/leads/{privacy_lead.json()['lead_id']}/outcome", json={"outcome": "won"})
+    assert held.status_code == 409
+
+    opted_out_lead = client.post("/api/leads", json={
+        "customer_name": "Suppressed Outcome Contact",
+        "customer_email": "suppressed-outcome@example.com",
+        "source": "website",
+        "raw_message": "Please stop contacting me.",
+    })
+    assert opted_out_lead.status_code == 201
+    suppressed = client.put(f"/api/leads/{opted_out_lead.json()['lead_id']}/outcome", json={"outcome": "won"})
+    assert suppressed.status_code == 409

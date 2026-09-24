@@ -5,18 +5,19 @@ Endpoints for lead creation, listing, detailed retrieval, AI analysis, response 
 
 import json
 import re
+from decimal import Decimal
 from typing import List, Optional
 from datetime import timedelta
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 import boto3
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.agent.lead_agent import LeadRescueAgent
 from app.api.deps import get_audit_repo, get_config_repo, get_followups_repo, get_leads_repo, get_privacy_requests_repo
 from app.api.security import require_roles
 from app.config.settings import settings
 from app.models.audit import AuditEventCreate
-from app.models.enums import FollowUpStatusEnum, LifecycleStatusEnum, PriorityEnum, ResponseStatusEnum, RiskStatusEnum, SourceEnum
+from app.models.enums import FollowUpStatusEnum, LifecycleStatusEnum, PriorityEnum, ResponseStatusEnum, RiskStatusEnum, SalesOutcomeEnum, SourceEnum
 from app.models.followup import FollowUp, FollowUpCreate
 from app.models.lead import Lead, LeadCreate
 from app.models.privacy_request import PrivacyRequest
@@ -43,6 +44,33 @@ class ResponseActionRequest(BaseModel):
 class UpdateStatusRequest(BaseModel):
     lifecycle_status: LifecycleStatusEnum
     reason: Optional[str] = None
+
+
+class SalesOutcomeRequest(BaseModel):
+    outcome: SalesOutcomeEnum
+    sales_value: Optional[Decimal] = Field(default=None, ge=0, le=1_000_000_000_000_000, max_digits=19, decimal_places=4)
+    sales_currency: Optional[str] = Field(default=None, pattern=r"^[A-Z]{3}$")
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("reason")
+    @classmethod
+    def clean_reason(cls, value):
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+    @model_validator(mode="after")
+    def validate_outcome_details(self):
+        if self.outcome in {SalesOutcomeEnum.LOST, SalesOutcomeEnum.DISQUALIFIED} and not self.reason:
+            raise ValueError("A reason is required for lost or disqualified outcomes")
+        if (self.sales_value is None) != (self.sales_currency is None):
+            raise ValueError("Sales value and currency must be provided together")
+        if self.sales_value is not None and self.outcome != SalesOutcomeEnum.WON:
+            raise ValueError("Sales value can only be recorded for a won outcome")
+        return self
 
 
 class AnalysisJobResponse(BaseModel):
@@ -729,4 +757,59 @@ def update_lead_status(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="This lead was updated by another operator. Refresh it before changing its status.",
+        ) from exc
+
+
+@router.put("/{lead_id}/outcome", response_model=Lead)
+def update_lead_outcome(
+    lead_id: str,
+    req: SalesOutcomeRequest,
+    _operator=Depends(require_roles(settings.operator_role, settings.admin_role)),
+    leads_repo: LeadsRepository = Depends(get_leads_repo),
+    audit_repo: AuditRepository = Depends(get_audit_repo),
+):
+    """Record an operator-confirmed sales outcome; never treat approval as a conversion."""
+    lead = leads_repo.get_by_id(lead_id)
+    if not lead:
+        raise HTTPException(status_code=404, detail=f"Lead with ID '{lead_id}' not found")
+    if lead.privacy_hold:
+        raise HTTPException(status_code=409, detail="Sales outcome changes are paused while a privacy request is reviewed")
+    if lead.lifecycle_status == LifecycleStatusEnum.OPTED_OUT or leads_repo.customer_opted_out(lead):
+        raise HTTPException(status_code=409, detail="Sales outcome changes are unavailable for a suppressed contact")
+
+    expected_updated_at = lead.updated_at
+    previous = {
+        "outcome": lead.sales_outcome.value if lead.sales_outcome else None,
+        "sales_value": str(lead.sales_value) if lead.sales_value is not None else None,
+        "sales_currency": lead.sales_currency,
+        "reason": lead.sales_outcome_reason,
+    }
+    lead.sales_outcome = req.outcome
+    lead.sales_value = req.sales_value
+    lead.sales_currency = req.sales_currency
+    lead.sales_outcome_reason = req.reason
+    lead.sales_outcome_at = effective_now().isoformat()
+    previous_status = lead.lifecycle_status
+    lead.lifecycle_status = LifecycleStatusEnum.RESOLVED
+    audit = audit_repo.build(AuditEventCreate(
+        lead_id=lead_id,
+        action="sales_outcome_recorded",
+        actor=f"user:{_operator['sub']}",
+        details={
+            "previous": previous,
+            "outcome": req.outcome.value,
+            "sales_value": str(req.sales_value) if req.sales_value is not None else None,
+            "sales_currency": req.sales_currency,
+            "reason": req.reason,
+            "previous_lifecycle_status": previous_status.value,
+            "lifecycle_status": LifecycleStatusEnum.RESOLVED.value,
+            "source": "operator_entered",
+        },
+    ))
+    try:
+        return leads_repo.save_with_audits(lead, [audit], audit_repo, expected_updated_at)
+    except ConcurrentLeadUpdateError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This lead was updated by another operator. Refresh it before recording its outcome.",
         ) from exc

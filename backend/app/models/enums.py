@@ -58,6 +58,13 @@ class ResponseStatusEnum(str, Enum):
     REJECTED = "rejected"
 
 
+class SalesOutcomeEnum(str, Enum):
+    """Operator-recorded business outcome; never inferred by the agent."""
+    WON = "won"
+    LOST = "lost"
+    DISQUALIFIED = "disqualified"
+
+
 class FollowUpStatusEnum(str, Enum):
     SCHEDULED = "scheduled"
     COMPLETED = "completed"

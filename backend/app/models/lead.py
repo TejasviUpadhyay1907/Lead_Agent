@@ -4,6 +4,7 @@ Strict Pydantic model for Lead records according to Phase 0 Revision 3.
 """
 
 import uuid
+from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
@@ -16,6 +17,7 @@ from app.models.enums import (
     PriorityEnum,
     ResponseStatusEnum,
     RiskStatusEnum,
+    SalesOutcomeEnum,
     SourceEnum,
     UrgencyEnum,
 )
@@ -86,6 +88,13 @@ class Lead(LeadBase):
 
     # Response Status (Human Approval Workflow)
     response_status: Optional[ResponseStatusEnum] = None
+    # Sales outcome is entered by an operator or later synchronized from a CRM.
+    # It is never inferred from model output or lifecycle status.
+    sales_outcome: Optional[SalesOutcomeEnum] = None
+    sales_value: Optional[Decimal] = Field(default=None, ge=0, le=1_000_000_000_000_000)
+    sales_currency: Optional[str] = Field(default=None, pattern=r"^[A-Z]{3}$")
+    sales_outcome_reason: Optional[str] = Field(default=None, max_length=500)
+    sales_outcome_at: Optional[str] = None
     # Durable worker idempotency marker, updated atomically with analysis results.
     last_analysis_job_id: Optional[str] = None
 

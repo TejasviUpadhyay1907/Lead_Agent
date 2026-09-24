@@ -2,17 +2,19 @@
 LeadRescue AI — Repository Integration/Unit Tests (Memory Mode)
 """
 
+from decimal import Decimal
+
 import pytest
 
 from app.models.audit import AuditEventCreate
 from app.models.config import ConfigUpdate
-from app.models.enums import FollowUpStatusEnum, LifecycleStatusEnum, SourceEnum
+from app.models.enums import FollowUpStatusEnum, LifecycleStatusEnum, SalesOutcomeEnum, SourceEnum
 from app.models.followup import FollowUpCreate, FollowUpUpdate
-from app.models.lead import LeadCreate, LeadUpdate
+from app.models.lead import Lead, LeadCreate, LeadUpdate
 from app.repositories.audit import AuditRepository
 from app.repositories.config import ConfigRepository
 from app.repositories.followups import FollowUpsRepository
-from app.repositories.leads import LeadsRepository
+from app.repositories.leads import LeadsRepository, _lead_storage_item, _serialize_item
 
 
 @pytest.fixture
@@ -60,6 +62,21 @@ def test_leads_repo_crud(leads_repo):
         LeadUpdate(lifecycle_status=LifecycleStatusEnum.ANALYZED),
     )
     assert updated.lifecycle_status == LifecycleStatusEnum.ANALYZED
+
+
+def test_sales_value_is_serialized_as_exact_dynamodb_number():
+    lead = Lead(
+        customer_name="Won Deal",
+        source=SourceEnum.WEBSITE,
+        raw_message="Please send a quote.",
+        sales_outcome=SalesOutcomeEnum.WON,
+        sales_value=Decimal("125000.50"),
+        sales_currency="INR",
+    )
+
+    encoded = _serialize_item(_lead_storage_item(lead, json_mode=True))
+
+    assert encoded["sales_value"]["N"] == "125000.50"
 
 
 def test_followups_repo_crud(followups_repo):

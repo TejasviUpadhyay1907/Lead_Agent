@@ -164,6 +164,11 @@ export const api = {
         body: JSON.stringify({ lifecycle_status: lifecycleStatus, reason }),
     }),
 
+    updateSalesOutcome: (id, outcome) => request(`/leads/${encodeURIComponent(id)}/outcome`, {
+        method: 'PUT',
+        body: JSON.stringify(outcome),
+    }),
+
     // Follow-ups
     getFollowupsPage: (params = {}) => {
         const query = new URLSearchParams({ limit: '50' });

@@ -51,6 +51,10 @@ def _next_updated_at(expected_updated_at: str) -> str:
 
 def _lead_storage_item(lead: Lead, json_mode: bool = False) -> dict:
     item = lead.model_dump(mode="json") if json_mode else lead.model_dump()
+    # Pydantic's JSON mode encodes Decimal as a string. Keep customer-entered
+    # deal values numeric in DynamoDB so later aggregate queries stay exact.
+    if json_mode and lead.sales_value is not None:
+        item["sales_value"] = lead.sales_value
     item.update(customer_index_keys(lead.tenant_id, lead.customer_email, lead.customer_phone))
     return item
 
