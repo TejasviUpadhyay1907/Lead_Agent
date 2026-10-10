@@ -56,7 +56,7 @@ export function PrivacyRequestsView({ onSelectLead }) {
         const status = targetStatus;
         if (!status) return;
         if (status === 'completed' && !window.confirm(
-            'Confirm that your company’s approved identity, legal, and fulfillment steps are complete. This action only records your attestation; LeadRescue will not export or erase data.'
+            'Confirm that your company’s approved identity, legal, and fulfillment steps are complete. Access bundles cover one verified email or phone in LeadRescue only; they do not include alternate identifiers or external systems. Erasure remains a separate approved fulfillment process.'
         )) return;
         setBusyId(request.request_id);
         setError('');
@@ -129,13 +129,34 @@ export function PrivacyRequestsView({ onSelectLead }) {
         }
     };
 
+    const exportMatchedBundle = async (request, match) => {
+        const key = `bundle:${request.request_id}:${match}`;
+        setRecordBusy(key);
+        setRecordErrors(current => ({ ...current, [key]: '' }));
+        try {
+            await api.exportPrivacyRequestBundle(request.request_id, match);
+            setNotice(`Downloaded the bounded bundle of locally indexed records matching the verified ${match}. Check the email and phone bundles and external systems separately; the bundle does not assert complete subject discovery.`);
+        } catch (reason) {
+            setRecordErrors(current => ({
+                ...current,
+                [key]: reason.status === 409
+                    ? 'Verify the access request before exporting a bundle.'
+                    : reason.status === 413
+                        ? 'The bundle exceeds the safe size limit. Use the paged record list to export individual matches.'
+                        : 'The matching-record bundle could not be downloaded. Retry after checking the request and identifier.',
+            }));
+        } finally {
+            setRecordBusy('');
+        }
+    };
+
     if (loading && requests.length === 0) return <Skeleton rows={5} label="Loading privacy request queue…" />;
 
     return <section className="privacy-queue">
         <PageHeader eyebrow="CUSTOMER DATA" title="Privacy requests" description="Review access and erasure requests. Verify identity and follow your company’s approved privacy process." >
             <button className="btn-secondary" onClick={() => load()} disabled={loading}><RefreshCw size={16} /> Refresh</button>
         </PageHeader>
-        <Notice tone="warning">Access requests can download one matching LeadRescue record and its local history at a time after identity verification. Review every email and phone match, and use the company’s approved process for other systems. Erasure is not performed here; do not record completion until the complete approved process is done.</Notice>
+        <Notice tone="warning">After identity verification, access requests can download a bounded bundle per email or phone match, or export records individually. Bundles use eventually consistent local indexes and do not discover changed identifiers or external systems; verify both identifier bundles and the company’s approved process before completion. Erasure is not performed here.</Notice>
         {notice && <Notice>{notice}</Notice>}
         <label className="privacy-filter">Show requests
             <select value={filterStatus} disabled={loading || Boolean(busyId)} onChange={event => { setFilterStatus(event.target.value); setRequests([]); setCursor(null); }}>
@@ -170,11 +191,16 @@ export function PrivacyRequestsView({ onSelectLead }) {
                         {request.status === 'completed' && <span className="privacy-completion-code">Recorded: {humanize(request.resolution_code || 'not specified')}</span>}
                     </div>
                     {canDiscover && <div className="privacy-record-discovery">
-                        <p>After identity verification, find candidate records by email and phone. Each export includes one matched lead and its LeadRescue history; it is not a complete subject-wide export across other identifiers or systems.</p>
+                        <p>After identity verification, download one bounded local bundle per selected identifier or export individual matches. The bundles are not a complete subject-wide export across other identifiers or systems.</p>
                         {['email', 'phone'].map(match => {
                             const key = `${request.request_id}:${match}`;
+                            const bundleKey = `bundle:${request.request_id}:${match}`;
                             const page = recordPages[key];
                             return <div className="privacy-record-match" key={match}>
+                                {request.request_type === 'access' && <button className="btn-secondary btn-sm" disabled={Boolean(recordBusy)} onClick={() => exportMatchedBundle(request, match)}>
+                                    {recordBusy === bundleKey ? 'Preparing bundle…' : `Download ${match} bundle`}
+                                </button>}
+                                {recordErrors[bundleKey] && <span role="alert" className="form-error">{recordErrors[bundleKey]}</span>}
                                 <button className="btn-secondary btn-sm" disabled={Boolean(recordBusy)} onClick={() => discoverRecords(request, match)}>
                                     {recordBusy === key ? 'Searching…' : `Find records by ${match}`}
                                 </button>

@@ -157,6 +157,59 @@ def test_access_record_export_requires_verified_request_and_matching_contact():
     assert request_lead["lead_id"] != first["lead_id"]
 
 
+def test_verified_access_request_downloads_a_bounded_bundle_for_one_identifier():
+    first = create_lead("Previous inquiry", email="bundle@example.com")
+    request_lead = create_lead("Send me my data", email="bundle@example.com")
+    unrelated = create_lead("Different customer", email="unrelated@example.com")
+    request = client.get("/api/privacy/requests?status=open").json()[0]
+    endpoint = f"/api/privacy/requests/{request['request_id']}/export?match=email"
+
+    unverified = client.get(endpoint)
+    assert unverified.status_code == 409
+    for target in ("identity_verification_required", "verified"):
+        response = client.put(
+            f"/api/privacy/requests/{request['request_id']}/status",
+            json={"status": target},
+        )
+        assert response.status_code == 200
+
+    response = client.get(endpoint)
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-store"
+    assert "attachment; filename=\"access-" in response.headers["content-disposition"]
+    payload = json.loads(response.content)
+    assert {item["lead"]["lead_id"] for item in payload["records"]} == {
+        first["lead_id"], request_lead["lead_id"],
+    }
+    assert all(set(item) == {"lead", "followups", "audit_events", "whatsapp_messages"} for item in payload["records"])
+    assert payload["export_context"]["complete_for_current_index_results"] is True
+    assert payload["export_context"]["complete_subject_export"] is False
+    assert "eventually_consistent" in payload["export_context"]["index_consistency"]
+    assert unrelated["lead_id"] not in {item["lead"]["lead_id"] for item in payload["records"]}
+    source_export = next(item for item in payload["records"] if item["lead"]["lead_id"] == request_lead["lead_id"])
+    assert any(event["action"] == "privacy_subject_bundle_exported" for event in source_export["audit_events"])
+
+
+def test_verified_access_bundle_refuses_partial_results_over_record_limit(monkeypatch):
+    first = create_lead("Previous inquiry", email="large-bundle@example.com")
+    request_lead = create_lead("Send me my data", email="large-bundle@example.com")
+    request = client.get("/api/privacy/requests?status=open").json()[0]
+    for target in ("identity_verification_required", "verified"):
+        response = client.put(
+            f"/api/privacy/requests/{request['request_id']}/status",
+            json={"status": target},
+        )
+        assert response.status_code == 200
+
+    monkeypatch.setattr("app.api.privacy.MAX_PRIVACY_BUNDLE_RECORDS", 1)
+    response = client.get(f"/api/privacy/requests/{request['request_id']}/export?match=email")
+    assert response.status_code == 413
+    assert response.json()["detail"].startswith("More than 1 records match")
+    events = client.get(f"/api/leads/{request_lead['lead_id']}/audit").json()
+    assert not any(event["action"] == "privacy_subject_bundle_exported" for event in events)
+    assert first["lead_id"] != request_lead["lead_id"]
+
+
 @pytest.mark.parametrize(
     ("message", "expected"),
     [
