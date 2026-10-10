@@ -130,6 +130,67 @@ def test_connect_consumes_state_and_stores_only_refresh_token_and_api_domain(mon
     assert state_updates == ["OAUTH_CONNECTED"]
 
 
+def test_disconnect_disables_locally_and_keeps_retryable_revocation_state(monkeypatch):
+    saved = []
+    source = {**_config(), "refresh_token": "refresh-secret", "api_domain": "https://www.zohoapis.in",
+             "connected_at": "2026-10-10T00:00:00+00:00", "outcome_writeback_enabled": True}
+    revoke_calls = []
+
+    def load():
+        return dict(saved[-1] if saved else source)
+
+    def revoke(config, token):
+        revoke_calls.append(token)
+        if len(revoke_calls) == 1:
+            raise zoho_oauth.ZohoOAuthError("temporary failure")
+
+    monkeypatch.setattr(zoho_oauth, "load_oauth_config", load)
+    monkeypatch.setattr(zoho_oauth, "save_oauth_config", lambda value: saved.append(dict(value)))
+    monkeypatch.setattr(zoho_oauth, "revoke_refresh_token", revoke)
+
+    first = zoho_oauth.disconnect_zoho()
+    assert first == {"connection_status": "revocation_pending", "provider_revocation": "pending"}
+    assert "refresh_token" not in saved[-1]
+    assert saved[-1]["pending_revocation_token"] == "refresh-secret"
+    assert saved[-1]["outcome_writeback_enabled"] is False
+    assert "api_domain" not in saved[-1] and "connected_at" not in saved[-1]
+    assert zoho_oauth.connection_status()["connection_status"] == "revocation_pending"
+
+    second = zoho_oauth.disconnect_zoho()
+    assert second == {"connection_status": "not_connected", "provider_revocation": "confirmed"}
+    assert "pending_revocation_token" not in saved[-1]
+    assert revoke_calls == ["refresh-secret", "refresh-secret"]
+
+
+def test_revocation_uses_region_specific_post_without_redirect(monkeypatch):
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return b'{"status":"success"}'
+
+    def fake_urlopen(request, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(zoho_oauth, "_urlopen_no_redirect", fake_urlopen)
+    zoho_oauth.revoke_refresh_token(_config(), "refresh/secret")
+
+    request = captured["request"]
+    assert request.full_url.startswith("https://accounts.zoho.in/oauth/v2/token/revoke?")
+    assert "refresh%2Fsecret" in request.full_url
+    assert request.get_method() == "POST"
+    assert request.data == b""
+    assert captured["timeout"] == 8
+
+
 def test_public_callback_rejects_replayed_authorization_state(monkeypatch):
     monkeypatch.setattr(
         "app.api.zoho_oauth.connect_with_authorization_code",
@@ -167,6 +228,41 @@ def test_oauth_authorize_route_rejects_non_admin_user(monkeypatch):
         lambda: {"sub": "operator-sub", "roles": ["sales_operator"]},
     )
     response = TestClient(app).post("/api/integrations/zoho/authorize")
+    assert response.status_code == 403
+
+
+def test_oauth_disconnect_route_is_admin_only_and_audited(monkeypatch):
+    from app.api.deps import get_audit_repo
+
+    recorded = []
+
+    class AuditStub:
+        def create(self, event):
+            recorded.append(event)
+
+    monkeypatch.setitem(
+        app.dependency_overrides,
+        require_authenticated_user,
+        lambda: {"sub": "admin-sub", "roles": ["company_admin"]},
+    )
+    monkeypatch.setitem(app.dependency_overrides, get_audit_repo, lambda: AuditStub())
+    monkeypatch.setattr("app.api.integrations.disconnect_zoho", lambda: {
+        "connection_status": "not_connected", "provider_revocation": "confirmed",
+    })
+    response = TestClient(app).post("/api/integrations/zoho/disconnect")
+    assert response.status_code == 200
+    assert recorded[0].action == "zoho_disconnect_requested"
+    assert recorded[0].actor == "user:admin-sub"
+    assert recorded[0].details == {"provider": "zoho-crm"}
+
+
+def test_oauth_disconnect_route_rejects_non_admin_user(monkeypatch):
+    monkeypatch.setitem(
+        app.dependency_overrides,
+        require_authenticated_user,
+        lambda: {"sub": "operator-sub", "roles": ["sales_operator"]},
+    )
+    response = TestClient(app).post("/api/integrations/zoho/disconnect")
     assert response.status_code == 403
 
 
