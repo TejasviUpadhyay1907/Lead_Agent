@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { ExternalLink, Link2, RefreshCw } from 'lucide-react';
 import { api } from '../../api/client';
 import { safeError } from '../../api/presentation';
+import { ZohoOutcomeMapping } from './ZohoOutcomeMapping';
 import { BusyLabel, Notice, SectionHeader } from './UI';
 
 const ALLOWED_ACCOUNTS_HOSTS = new Set([
@@ -87,6 +88,8 @@ export function ZohoConnectionPanel({ demoMode = false }) {
         }
     };
 
+    const updateStatus = nextStatus => setStatus(current => ({ ...current, ...nextStatus }));
+
     return (
         <section className="panel">
             <SectionHeader
@@ -148,7 +151,14 @@ export function ZohoConnectionPanel({ demoMode = false }) {
                             </a>
                         )}
                     </div>
-                    <p className="field-hint">The OAuth grant requests read and update access to the Leads module. Outcome writeback also requires an administrator-configured custom field mapping in the deployment secret.</p>
+                    {status?.connection_status === 'configured' && (
+                        <ZohoOutcomeMapping
+                            status={status}
+                            onUpdated={updateStatus}
+                            onReconnect={prepareAuthorization}
+                        />
+                    )}
+                    <p className="field-hint">The OAuth grant requests read and update access to Leads and read-only access to field metadata. Configure outcome writeback with the field mapper below.</p>
                 </div>
             )}
         </section>

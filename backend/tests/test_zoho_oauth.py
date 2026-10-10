@@ -29,7 +29,7 @@ def test_authorization_url_uses_offline_lead_update_scope_and_single_use_state(m
     query = parse_qs(urlsplit(url).query)
 
     assert query == {
-        "scope": ["ZohoCRM.modules.leads.READ,ZohoCRM.modules.leads.UPDATE"],
+        "scope": ["ZohoCRM.modules.leads.READ,ZohoCRM.modules.leads.UPDATE,ZohoCRM.settings.fields.READ"],
         "client_id": ["client-id"],
         "response_type": ["code"],
         "access_type": ["offline"],
@@ -126,6 +126,7 @@ def test_connect_consumes_state_and_stores_only_refresh_token_and_api_domain(mon
 
     assert saved[0]["refresh_token"] == "long-lived-refresh"
     assert saved[0]["api_domain"] == "https://www.zohoapis.in"
+    assert saved[0]["requested_scopes"] == zoho_oauth.ZOHO_LEAD_UPDATE_SCOPE.split(",")
     assert "access_token" not in saved[0]
     assert state_updates == ["OAUTH_CONNECTED"]
 
@@ -189,6 +190,113 @@ def test_revocation_uses_region_specific_post_without_redirect(monkeypatch):
     assert request.get_method() == "POST"
     assert request.data == b""
     assert captured["timeout"] == 8
+
+
+def test_field_metadata_returns_only_safe_writable_custom_fields(monkeypatch):
+    config = {
+        **_config(),
+        "refresh_token": "refresh-token",
+        "requested_scopes": zoho_oauth.ZOHO_LEAD_UPDATE_SCOPE.split(","),
+    }
+    monkeypatch.setattr(zoho_oauth, "load_oauth_config", lambda: dict(config))
+    monkeypatch.setattr(zoho_oauth, "refresh_access_token", lambda _config: ("access-token", "https://www.zohoapis.in"))
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            import json
+            return json.dumps({"fields": [
+                {
+                    "api_name": "Rescue_Outcome", "field_label": "Rescue Outcome", "data_type": "picklist",
+                    "custom_field": True, "read_only": False, "field_read_only": False,
+                    "system_mandatory": False, "operation_type": {"api_update": True},
+                    "pick_list_values": [{"actual_value": value} for value in ["won", "lost", "disqualified"]],
+                },
+                {
+                    "api_name": "Email", "field_label": "Email", "data_type": "email",
+                    "custom_field": False, "operation_type": {"api_update": True},
+                },
+                {
+                    "api_name": "Private_Field", "field_label": "Private", "data_type": "text",
+                    "custom_field": True, "operation_type": {"api_update": True},
+                    "private": {"restricted": True},
+                },
+                {
+                    "api_name": "Read_Only", "field_label": "Read Only", "data_type": "text",
+                    "custom_field": True, "operation_type": {"api_update": False},
+                },
+                {
+                    "api_name": "Case_Mismatch", "field_label": "Case Mismatch", "data_type": "picklist",
+                    "custom_field": True, "operation_type": {"api_update": True},
+                    "pick_list_values": [{"actual_value": value} for value in ["Won", "Lost", "Disqualified"]],
+                },
+                {
+                    "api_name": "Unused_Outcome", "field_label": "Unused Outcome", "data_type": "picklist",
+                    "custom_field": True, "operation_type": {"api_update": True},
+                    "pick_list_values": [{"actual_value": value, "type": "unused"} for value in ["won", "lost", "disqualified"]],
+                },
+            ]}).encode()
+
+    def fake_urlopen(request, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(zoho_oauth, "_urlopen_no_redirect", fake_urlopen)
+    fields = zoho_oauth.list_writable_lead_fields()
+
+    assert [field["api_name"] for field in fields] == ["Rescue_Outcome"]
+    assert fields[0]["eligible_for"] == ["outcome"]
+    assert "module=Leads" in captured["request"].full_url
+    assert "Zoho-oauthtoken access-token" == captured["request"].get_header("Authorization")
+    assert captured["timeout"] == 8
+
+
+def test_field_metadata_requires_explicit_new_scope(monkeypatch):
+    config = {**_config(), "refresh_token": "refresh-token", "requested_scopes": ["ZohoCRM.modules.leads.READ"]}
+    monkeypatch.setattr(zoho_oauth, "load_oauth_config", lambda: config)
+    with pytest.raises(HTTPException) as exc:
+        zoho_oauth.list_writable_lead_fields()
+    assert exc.value.status_code == 409
+    assert "Reconnect" in exc.value.detail
+
+
+def test_outcome_mapping_saves_only_compatible_metadata_fields(monkeypatch):
+    config = {**_config(), "refresh_token": "refresh-token", "outcome_writeback_enabled": False}
+    saved = []
+    fields = [
+        {"api_name": "Rescue_Outcome", "eligible_for": ["outcome"]},
+        {"api_name": "Rescue_Amount", "eligible_for": ["sales_value"]},
+    ]
+    monkeypatch.setattr(zoho_oauth, "load_oauth_config", lambda: dict(config))
+    monkeypatch.setattr(zoho_oauth, "list_writable_lead_fields", lambda _config: fields)
+    monkeypatch.setattr(zoho_oauth, "save_oauth_config", lambda value: saved.append(dict(value)))
+
+    result = zoho_oauth.update_outcome_field_mapping(True, {
+        "outcome": "Rescue_Outcome", "sales_value": "Rescue_Amount",
+    })
+
+    assert saved[0]["outcome_writeback_enabled"] is True
+    assert saved[0]["outcome_field_mapping"] == {"outcome": "Rescue_Outcome", "sales_value": "Rescue_Amount"}
+    assert result["outcome_writeback_enabled"] is True
+
+
+def test_outcome_mapping_rejects_incompatible_or_reused_fields(monkeypatch):
+    config = {**_config(), "refresh_token": "refresh-token"}
+    monkeypatch.setattr(zoho_oauth, "load_oauth_config", lambda: dict(config))
+    monkeypatch.setattr(zoho_oauth, "list_writable_lead_fields", lambda _config: [
+        {"api_name": "Rescue_Outcome", "eligible_for": ["outcome"]},
+    ])
+    with pytest.raises(HTTPException) as incompatible:
+        zoho_oauth.update_outcome_field_mapping(True, {"outcome": "Rescue_Outcome", "reason": "Rescue_Outcome"})
+    assert incompatible.value.status_code == 422
+    assert "distinct" in incompatible.value.detail
 
 
 def test_public_callback_rejects_replayed_authorization_state(monkeypatch):
@@ -263,6 +371,45 @@ def test_oauth_disconnect_route_rejects_non_admin_user(monkeypatch):
         lambda: {"sub": "operator-sub", "roles": ["sales_operator"]},
     )
     response = TestClient(app).post("/api/integrations/zoho/disconnect")
+    assert response.status_code == 403
+
+
+def test_zoho_mapping_route_is_admin_only_and_audits_configuration(monkeypatch):
+    from app.api.deps import get_audit_repo
+
+    recorded = []
+
+    class AuditStub:
+        def create(self, event):
+            recorded.append(event)
+
+    monkeypatch.setitem(
+        app.dependency_overrides,
+        require_authenticated_user,
+        lambda: {"sub": "admin-sub", "roles": ["company_admin"]},
+    )
+    monkeypatch.setitem(app.dependency_overrides, get_audit_repo, lambda: AuditStub())
+    monkeypatch.setattr("app.api.integrations.update_outcome_field_mapping", lambda enabled, mapping: {
+        "connection_status": "configured", "outcome_writeback_enabled": enabled,
+        "outcome_field_mapping": mapping,
+    })
+    response = TestClient(app).put("/api/integrations/zoho/outcome-mapping", json={
+        "enabled": True,
+        "field_mapping": {"outcome": "Rescue_Outcome"},
+    })
+    assert response.status_code == 200
+    assert response.json()["outcome_writeback_enabled"] is True
+    assert recorded[0].action == "zoho_outcome_mapping_update_requested"
+    assert recorded[0].details == {"enabled": True, "mapped_fields": ["Rescue_Outcome"]}
+
+
+def test_zoho_field_metadata_route_rejects_non_admin_user(monkeypatch):
+    monkeypatch.setitem(
+        app.dependency_overrides,
+        require_authenticated_user,
+        lambda: {"sub": "operator-sub", "roles": ["sales_operator"]},
+    )
+    response = TestClient(app).get("/api/integrations/zoho/fields")
     assert response.status_code == 403
 
 
