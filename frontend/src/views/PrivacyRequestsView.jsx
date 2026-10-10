@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowUpRight, ShieldAlert, RefreshCw } from 'lucide-react';
+import { ArrowUpRight, Download, ShieldAlert, RefreshCw } from 'lucide-react';
 import { api } from '../api/client';
 import { dateTime, humanize } from '../api/presentation';
 import { EmptyState, ErrorState, Notice, PageHeader, Skeleton } from '../components/Common/UI';
@@ -108,13 +108,34 @@ export function PrivacyRequestsView({ onSelectLead }) {
         }
     };
 
+    const exportMatchedRecord = async (request, record, match) => {
+        const key = `export:${request.request_id}:${record.lead_id}`;
+        setRecordBusy(key);
+        setRecordErrors(current => ({ ...current, [key]: '' }));
+        try {
+            await api.exportPrivacyRequestRecord(request.request_id, record.lead_id, match);
+            setNotice(`Downloaded one lead record and its LeadRescue history for access request ${request.request_id}. Repeat for every verified match; this does not include external systems.`);
+        } catch (reason) {
+            setRecordErrors(current => ({
+                ...current,
+                [key]: reason.status === 409
+                    ? 'Verify the access request before exporting a matching record.'
+                    : reason.status === 404
+                        ? 'This record no longer matches the request contact. Refresh the identity match list.'
+                        : 'The matched record export failed. Retry after checking the request and record.',
+            }));
+        } finally {
+            setRecordBusy('');
+        }
+    };
+
     if (loading && requests.length === 0) return <Skeleton rows={5} label="Loading privacy request queue…" />;
 
     return <section className="privacy-queue">
         <PageHeader eyebrow="CUSTOMER DATA" title="Privacy requests" description="Review access and erasure requests. Verify identity and follow your company’s approved privacy process." >
             <button className="btn-secondary" onClick={() => load()} disabled={loading}><RefreshCw size={16} /> Refresh</button>
         </PageHeader>
-        <Notice tone="warning">This queue tracks administrator review only. It does not export or delete customer data. Complete the approved process outside this screen before recording completion.</Notice>
+        <Notice tone="warning">Access requests can download one matching LeadRescue record and its local history at a time after identity verification. Review every email and phone match, and use the company’s approved process for other systems. Erasure is not performed here; do not record completion until the complete approved process is done.</Notice>
         {notice && <Notice>{notice}</Notice>}
         <label className="privacy-filter">Show requests
             <select value={filterStatus} disabled={loading || Boolean(busyId)} onChange={event => { setFilterStatus(event.target.value); setRequests([]); setCursor(null); }}>
@@ -149,7 +170,7 @@ export function PrivacyRequestsView({ onSelectLead }) {
                         {request.status === 'completed' && <span className="privacy-completion-code">Recorded: {humanize(request.resolution_code || 'not specified')}</span>}
                     </div>
                     {canDiscover && <div className="privacy-record-discovery">
-                        <p>After identity verification, find candidate records by contact identifier. Results omit contact details and message text; review each record before fulfilling the request.</p>
+                        <p>After identity verification, find candidate records by email and phone. Each export includes one matched lead and its LeadRescue history; it is not a complete subject-wide export across other identifiers or systems.</p>
                         {['email', 'phone'].map(match => {
                             const key = `${request.request_id}:${match}`;
                             const page = recordPages[key];
@@ -164,6 +185,10 @@ export function PrivacyRequestsView({ onSelectLead }) {
                                         : page.items.map(record => <div className="privacy-record-result" key={record.lead_id}>
                                             <span><code>{record.lead_id}</code><small>{humanize(record.source)} · {humanize(record.lifecycle_status)} · {dateTime(record.created_at)}</small></span>
                                             {onSelectLead && <button className="btn-text" onClick={() => onSelectLead(record.lead_id)}>Review record</button>}
+                                            {request.request_type === 'access' && <button className="btn-secondary btn-sm" disabled={Boolean(recordBusy)} onClick={() => exportMatchedRecord(request, record, match)}>
+                                                {recordBusy === `export:${request.request_id}:${record.lead_id}` ? 'Preparing…' : <><Download size={14} /> Export this record</>}
+                                            </button>}
+                                            {recordErrors[`export:${request.request_id}:${record.lead_id}`] && <span role="alert" className="form-error">{recordErrors[`export:${request.request_id}:${record.lead_id}`]}</span>}
                                         </div>)}
                                     {page.nextCursor && <button className="btn-text" disabled={Boolean(recordBusy)} onClick={() => discoverRecords(request, match, page.nextCursor)}>Load more matches</button>}
                                 </div>}
