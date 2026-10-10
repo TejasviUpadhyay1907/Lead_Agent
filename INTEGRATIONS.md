@@ -79,7 +79,7 @@ This generic webhook is one inbound adapter. Zoho CRM OAuth and outcome-writebac
 
 ## Recommended first-pilot connector: Zoho CRM + WhatsApp Business Platform
 
-This is the current default for an India-based SMB pilot, subject to confirmation by the design partner. Zoho create/edit intake and OAuth are implemented; mapped outcome writeback is implemented on an unmerged branch. None of these statements imply successful customer-account or staging validation. Zoho CRM exposes OAuth 2.0 delegated access and webhook configuration for record events; Zoho webhooks can send dynamic CRM fields and configured custom headers. See the [OAuth overview](https://www.zoho.com/crm/developer/docs/api/v8/oauth-overview.html) and [webhook configuration API](https://www.zoho.com/crm/developer/docs/api/v8/create-webhook.html). WhatsApp Business Platform provides a test/sandbox path and webhooks, while its [current messaging policy](https://whatsappbusiness.com/policy/) requires recipient permission, opt-out compliance, and approved templates to initiate conversations.
+This is the current default for an India-based SMB pilot, subject to confirmation by the design partner. Zoho create/edit intake, OAuth, and mapped outcome writeback are implemented. None of these statements imply successful customer-account or staging validation. Zoho CRM exposes OAuth 2.0 delegated access and webhook configuration for record events; Zoho webhooks can send dynamic CRM fields and configured custom headers. See the [OAuth overview](https://www.zoho.com/crm/developer/docs/api/v8/oauth-overview.html) and [webhook configuration API](https://www.zoho.com/crm/developer/docs/api/v8/create-webhook.html). WhatsApp Business Platform provides a test/sandbox path and webhooks, while its [current messaging policy](https://whatsappbusiness.com/policy/) requires recipient permission, opt-out compliance, and approved templates to initiate conversations.
 
 ### Zoho CRM lead create and versioned edit intake (implemented; staging validation still required)
 
@@ -107,7 +107,7 @@ Configure a second Zoho workflow for lead edits to POST the same **complete snap
 
 Zoho is authoritative only for customer name, email, phone, source, and inquiry text in this direction. A change clears cached analysis and draft approval; a phone change also clears the stored WhatsApp consent binding. The sync preserves LeadRescue lifecycle and operator-entered sales outcomes, and it never sends a message or writes back to Zoho. These inbound endpoints do not provide CRM outcome writeback or live vendor validation. Do not enable them in production until payload interpolation, complete field behavior, retries, update ordering, and secret rotation have been observed against the pilot's sandbox.
 
-### Zoho CRM OAuth and outcome writeback (OAuth merged; outcome writeback under review; sandbox validation pending)
+### Zoho CRM OAuth and outcome writeback (implemented; sandbox validation pending)
 
 Register a Zoho web-based OAuth client and register the exact HTTPS callback URI `https://<customer-api-host>/integrations/v1/zoho/oauth/callback`. Create a Secrets Manager secret and configure its ARN as `ZohoOAuthSecretArn`. The initial secret JSON must contain `client_id`, `client_secret`, `accounts_url`, and `redirect_uri`; the redirect value must exactly match the registered callback URI. `accounts_url` must be one of the supported regional Accounts origins in `zoho_oauth.py`. Keep this secret separate from `ZohoWebhookSecretArn` and do not place it in browser configuration.
 
