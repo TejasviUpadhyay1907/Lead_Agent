@@ -3,6 +3,7 @@ LeadRescue AI — Repository Integration/Unit Tests (Memory Mode)
 """
 
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -63,6 +64,47 @@ def test_leads_repo_crud(leads_repo):
     )
     assert updated.lifecycle_status == LifecycleStatusEnum.ANALYZED
 
+
+def test_outcome_outbox_is_part_of_optimistic_lead_audit_transaction():
+    captured = {}
+
+    class Client:
+        def transact_write_items(self, *, TransactItems):
+            captured["items"] = TransactItems
+
+    repo = LeadsRepository(use_memory=True)
+    repo.use_memory = False
+    repo._table = SimpleNamespace(meta=SimpleNamespace(client=Client()))
+    repo._suppressions_ready = True
+    audit_builder = AuditRepository(use_memory=True)
+    audit_builder.use_memory = False
+    audit_builder._table = object()
+    audit = AuditRepository(use_memory=True).build(AuditEventCreate(
+        lead_id="lead-outbox-atomic",
+        action="sales_outcome_recorded",
+        actor="user:operator",
+    ))
+    lead = Lead(customer_name="Atomic Outbox", source=SourceEnum.WEBSITE, raw_message="quote")
+    expected = lead.updated_at
+    outbox = {
+        "event_id": "event-outbox-atomic",
+        "tenant_lead_key": f"{lead.tenant_id}#{lead.lead_id}",
+        "tenant_id": lead.tenant_id,
+        "lead_id": lead.lead_id,
+        "source_record_id": "zoho-record-atomic",
+        "fields": {"LeadRescue_Outcome": "won"},
+        "status": "pending",
+        "created_at": "2026-10-10T12:00:00+00:00",
+        "expires_at": 1791633600,
+    }
+
+    repo.save_workflow(lead, [], [audit], None, audit_builder, expected, outbox_item=outbox)
+
+    puts = [item["Put"] for item in captured["items"] if "Put" in item]
+    assert {put["TableName"] for put in puts} >= {
+        "leadrescue-leads", "leadrescue-audit", "leadrescue-zoho-writeback-outbox"
+    }
+    assert any(put["TableName"] == "leadrescue-zoho-writeback-outbox" and put["Item"]["event_id"]["S"] == outbox["event_id"] for put in puts)
 
 def test_sales_value_is_serialized_as_exact_dynamodb_number():
     lead = Lead(

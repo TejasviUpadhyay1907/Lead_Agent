@@ -135,6 +135,22 @@ Resources:
         deadLetterTargetArn: !GetAtt AnalysisJobsDeadLetterQueue.Arn
         maxReceiveCount: 3
 
+  ZohoOutcomeWritebackFailureQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 180
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ZohoOutcomeWritebackFailureDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  ZohoOutcomeWritebackFailureDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
   LeadRescueApi:
     Type: AWS::Serverless::Api
     Properties:
@@ -265,6 +281,7 @@ Resources:
                 - !GetAtt CustomerSuppressionsTable.Arn
                 - !GetAtt PrivacyRequestsTable.Arn
                 - !GetAtt WhatsAppMessagesTable.Arn
+                - !GetAtt ZohoOutcomeWritebackOutboxTable.Arn
         - Statement:
             - Effect: Allow
               Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem]
@@ -414,6 +431,70 @@ Resources:
             BatchSize: 1
             MaximumBatchingWindowInSeconds: 0
 
+  LeadRescueZohoWritebackWorker:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/
+      Handler: app.zoho_writeback_worker.handler
+      Description: Sends operator-confirmed outcomes to linked Zoho CRM leads
+      Timeout: 30
+      MemorySize: 256
+      ReservedConcurrentExecutions: !Ref AnalysisWorkerConcurrency
+      Environment:
+        Variables:
+          DEMO_MODE: "false"
+          APP_ENV: production
+          TENANT_ID: !Ref TenantId
+          LEADS_TABLE: !Ref LeadsTable
+          AUDIT_TABLE: !Ref AuditTable
+          ZOHO_OAUTH_SECRET_ARN: !Ref ZohoOAuthSecretArn
+          ZOHO_WRITEBACK_OUTBOX_TABLE: !Ref ZohoOutcomeWritebackOutboxTable
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:UpdateItem]
+              Resource:
+                - !GetAtt LeadsTable.Arn
+                - !GetAtt ZohoOutcomeWritebackOutboxTable.Arn
+            - Effect: Allow
+              Action: dynamodb:PutItem
+              Resource: !GetAtt AuditTable.Arn
+            - Effect: Allow
+              Action: [dynamodb:DescribeStream, dynamodb:GetRecords, dynamodb:GetShardIterator, dynamodb:ListStreams]
+              Resource: !GetAtt ZohoOutcomeWritebackOutboxTable.StreamArn
+            - Effect: Allow
+              Action: sqs:SendMessage
+              Resource: !GetAtt ZohoOutcomeWritebackFailureQueue.Arn
+            - !If
+              - HasZohoOAuthSecret
+              - Effect: Allow
+                Action: [secretsmanager:GetSecretValue]
+                Resource: !Ref ZohoOAuthSecretArn
+              - !Ref AWS::NoValue
+      Events:
+        ZohoOutcomeOutbox:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt ZohoOutcomeWritebackOutboxTable.StreamArn
+            StartingPosition: TRIM_HORIZON
+            BatchSize: 1
+            MaximumRetryAttempts: 5
+            BisectBatchOnFunctionError: true
+            DestinationConfig:
+              OnFailure:
+                Destination: !GetAtt ZohoOutcomeWritebackFailureQueue.Arn
+            FilterCriteria:
+              Filters:
+                - Pattern: '{"eventName":["INSERT"]}'
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+        WritebackFailureQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ZohoOutcomeWritebackFailureQueue.Arn
+            BatchSize: 1
+            MaximumBatchingWindowInSeconds: 0
+
   LeadRescueLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -424,6 +505,12 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub "/aws/lambda/${LeadRescueAnalysisWorker}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  LeadRescueZohoWritebackLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${LeadRescueZohoWritebackWorker}"
       RetentionInDays: !Ref LogRetentionDays
 
   LambdaErrorsAlarm:
@@ -526,6 +613,60 @@ Resources:
       Dimensions:
         - Name: QueueName
           Value: !GetAtt AnalysisJobsDeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopicArn]
+
+  ZohoWritebackWorkerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-zoho-writeback-worker-errors"
+      AlarmDescription: The Zoho writeback worker is failing; review its logs and outbox failures.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LeadRescueZohoWritebackWorker
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopicArn]
+
+  ZohoWritebackFailuresAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-zoho-writeback-failures"
+      AlarmDescription: Zoho writeback failure notifications have waited more than five minutes for reconciliation.
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt ZohoOutcomeWritebackFailureQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 300
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopicArn]
+
+  ZohoWritebackFailureDeadLetterAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-zoho-writeback-failure-dead-letter"
+      AlarmDescription: The Zoho failure reconciler could not update local sync status; investigate the dead-letter queue.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt ZohoOutcomeWritebackFailureDeadLetterQueue.QueueName
       Statistic: Maximum
       Period: 300
       EvaluationPeriods: 1
@@ -704,6 +845,29 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: expires_at
         Enabled: true
+
+  ZohoOutcomeWritebackOutboxTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: leadrescue-zoho-writeback-outbox
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: tenant_lead_key
+          AttributeType: S
+        - AttributeName: event_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: tenant_lead_key
+          KeyType: HASH
+        - AttributeName: event_id
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
 
   CustomerSuppressionsTable:
     Type: AWS::DynamoDB::Table
