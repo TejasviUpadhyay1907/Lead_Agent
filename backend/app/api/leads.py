@@ -6,7 +6,9 @@ Endpoints for lead creation, listing, detailed retrieval, AI analysis, response 
 import json
 import hashlib
 import hmac
+import logging
 import re
+import uuid
 from decimal import Decimal
 from typing import List, Optional
 from datetime import datetime, timedelta, timezone
@@ -37,8 +39,12 @@ from app.repositories.customer_index import CustomerIndexKeyUnavailableError, cu
 from app.utils.time import effective_now
 from app.policy.guardrails import check_opt_out, detect_privacy_request
 from app.integrations.whatsapp import WhatsAppConfigurationError, load_config as load_whatsapp_config, send_approved_template, template_fingerprint
+from app.integrations.zoho import source_record_id_for_lead
+from app.integrations.zoho_oauth import load_oauth_config
+from app.integrations.zoho_writeback import build_outcome_fields
 
 router = APIRouter(prefix="/leads", tags=["Leads"])
+logger = logging.getLogger(__name__)
 
 
 class ResponseActionRequest(BaseModel):
@@ -1102,6 +1108,10 @@ def update_lead_outcome(
     lead.sales_currency = req.sales_currency
     lead.sales_outcome_reason = req.reason
     lead.sales_outcome_at = effective_now().isoformat()
+    lead.crm_sync_status = None
+    lead.crm_sync_event_id = None
+    lead.crm_sync_updated_at = None
+    lead.crm_sync_error_code = None
     previous_status = lead.lifecycle_status
     lead.lifecycle_status = LifecycleStatusEnum.RESOLVED
     audit = audit_repo.build(AuditEventCreate(
@@ -1119,8 +1129,44 @@ def update_lead_outcome(
             "source": "operator_entered",
         },
     ))
+    outbox_item = None
+    if settings.zoho_oauth_secret_arn:
+        try:
+            source_record_id = source_record_id_for_lead(lead_id)
+            zoho_config = load_oauth_config()
+            if source_record_id and zoho_config.get("refresh_token") and zoho_config.get("outcome_writeback_enabled"):
+                event_id = str(uuid.uuid4())
+                mapped_outcome = {
+                    "outcome": req.outcome.value,
+                    "sales_value": format(req.sales_value, "f") if req.sales_value is not None else None,
+                    "sales_currency": req.sales_currency,
+                    "reason": req.reason,
+                    "recorded_at": lead.sales_outcome_at,
+                }
+                mapped_fields = build_outcome_fields(zoho_config, mapped_outcome)
+                lead.crm_sync_status = "pending"
+                lead.crm_sync_event_id = event_id
+                lead.crm_sync_updated_at = lead.sales_outcome_at
+                lead.crm_sync_error_code = None
+                outbox_item = {
+                    "event_id": event_id,
+                    "tenant_id": settings.effective_tenant_id,
+                    "lead_id": lead_id,
+                    "tenant_lead_key": f"{settings.effective_tenant_id}#{lead_id}",
+                    "source_record_id": source_record_id,
+                    "fields": mapped_fields,
+                    "status": "pending",
+                    "created_at": lead.sales_outcome_at,
+                    "expires_at": int(datetime.now(timezone.utc).timestamp()) + 90 * 24 * 60 * 60,
+                }
+        except HTTPException as exc:
+            # CRM configuration trouble must not prevent recording an operator's
+            # local sales outcome. The integration remains visibly unverified.
+            logger.warning("Zoho outcome writeback was not queued (%s)", exc.status_code)
+        except Exception as exc:
+            logger.warning("Zoho outcome writeback setup failed (%s)", type(exc).__name__)
     try:
-        return leads_repo.save_with_audits(lead, [audit], audit_repo, expected_updated_at)
+        return leads_repo.save_workflow(lead, [], [audit], None, audit_repo, expected_updated_at, outbox_item=outbox_item)
     except ConcurrentLeadUpdateError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

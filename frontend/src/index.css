@@ -784,6 +784,11 @@ textarea {
 .activity-trail { display: grid; gap: .55rem; }
 .intent-line { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; color: var(--text-muted); font-size: .68rem; }
 .outcome-panel { display: grid; gap: .8rem; }
+.crm-sync-state { display: grid; gap: .2rem; padding: .65rem .75rem; border: 1px solid var(--border-color); border-radius: var(--radius-sm); color: var(--text-muted); font-size: .72rem; }
+.crm-sync-state strong { color: var(--text-main); }
+.crm-sync-state small { color: var(--text-dim); }
+.crm-sync-synced { border-color: var(--border-success); background: var(--bg-success); }
+.crm-sync-conflict,.crm-sync-failed { border-color: var(--color-hot); background: rgba(244,63,94,.08); }
 .whatsapp-consent-panel { display: grid; gap: .8rem; }
 .consent-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
 .consent-evidence { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: .65rem; }

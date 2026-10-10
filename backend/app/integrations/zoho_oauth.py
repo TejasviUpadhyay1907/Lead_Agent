@@ -3,12 +3,13 @@
 import hashlib
 import json
 import logging
+import re
 import secrets
 import time
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import boto3
 from botocore.config import Config
@@ -41,7 +42,11 @@ ZOHO_API_DOMAINS = frozenset({
     "https://www.zohoapis.com.sg",
     "https://www.zohoapis.com.mx",
 })
-ZOHO_LEAD_UPDATE_SCOPE = "ZohoCRM.modules.leads.UPDATE"
+ZOHO_LEAD_UPDATE_SCOPE = "ZohoCRM.modules.leads.READ,ZohoCRM.modules.leads.UPDATE"
+ZOHO_OUTCOME_RESERVED_FIELDS = frozenset({
+    "id", "created_time", "modified_time", "email", "phone", "first_name", "last_name",
+    "company", "lead_source", "lead_status", "owner", "is_converted", "converted_date",
+})
 OAUTH_STATE_TTL_SECONDS = 10 * 60
 _access_token: str | None = None
 _access_token_expires_at = 0.0
@@ -50,6 +55,17 @@ _access_token_api_domain: str | None = None
 
 class ZohoOAuthError(RuntimeError):
     """Safe-to-surface Zoho connection error without provider response details."""
+
+
+class _RejectRedirects(HTTPRedirectHandler):
+    """Never forward OAuth grants or client credentials to a redirect target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _urlopen_no_redirect(request, timeout):
+    return build_opener(_RejectRedirects).open(request, timeout=timeout)
 
 
 def _secret_arn() -> str:
@@ -94,6 +110,22 @@ def load_oauth_config() -> dict:
     api_domain = config.get("api_domain")
     if api_domain is not None and api_domain not in ZOHO_API_DOMAINS:
         raise HTTPException(status_code=503, detail="Zoho CRM API region is unsupported")
+    mapping = config.get("outcome_field_mapping")
+    if mapping is not None:
+        if not isinstance(mapping, dict) or not isinstance(mapping.get("outcome"), str):
+            raise HTTPException(status_code=503, detail="Zoho outcome field mapping is malformed")
+        allowed_mapping_keys = {"outcome", "sales_value", "sales_currency", "reason", "recorded_at"}
+        if set(mapping) - allowed_mapping_keys:
+            raise HTTPException(status_code=503, detail="Zoho outcome field mapping contains unsupported fields")
+        values = list(mapping.values())
+        if (
+            any(not isinstance(value, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,99}", value) for value in values)
+            or len({value.casefold() for value in values if isinstance(value, str)}) != len(values)
+            or any(value.casefold() in ZOHO_OUTCOME_RESERVED_FIELDS for value in values if isinstance(value, str))
+        ):
+            raise HTTPException(status_code=503, detail="Zoho outcome field mapping contains invalid or duplicate field names")
+    if "outcome_writeback_enabled" in config and not isinstance(config["outcome_writeback_enabled"], bool):
+        raise HTTPException(status_code=503, detail="Zoho outcome writeback setting is malformed")
     return config
 
 
@@ -221,7 +253,7 @@ def _token_request(accounts_url: str, parameters: dict) -> dict:
         method="POST",
     )
     try:
-        with urlopen(request, timeout=8) as response:
+        with _urlopen_no_redirect(request, timeout=8) as response:
             result = json.loads(response.read(64 * 1024))
     except HTTPError as exc:
         exc.close()
@@ -284,6 +316,7 @@ def connection_status() -> dict:
         "accounts_region": urlsplit(config["accounts_url"]).hostname,
         "api_region": urlsplit(config["api_domain"]).hostname if config.get("api_domain") else None,
         "scope": ZOHO_LEAD_UPDATE_SCOPE,
+        "outcome_writeback_enabled": bool(config.get("outcome_writeback_enabled") and config.get("outcome_field_mapping")),
     }
 
 

@@ -87,7 +87,7 @@ export function ZohoConnectionPanel({ demoMode = false }) {
                                 <strong>{status.connection_status === 'configured' ? 'Authorization saved' : 'Not connected'}</strong>
                                 <p>
                                     {status.connection_status === 'configured'
-                                        ? `Zoho ${status.accounts_region || ''}${status.api_region ? ` · API ${status.api_region}` : ''}. Token validity is not checked here.`
+                                        ? `Zoho ${status.accounts_region || ''}${status.api_region ? ` · API ${status.api_region}` : ''}. Token validity is not checked here. ${status.outcome_writeback_enabled ? 'Outcome writeback is enabled.' : 'Outcome writeback remains off until an administrator configures and enables the CRM field mapping.'}`
                                         : 'Ask the deployment administrator to configure the Zoho OAuth secret before connecting.'}
                                 </p>
                             </div>

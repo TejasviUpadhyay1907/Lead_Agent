@@ -75,11 +75,11 @@ response = requests.post(
 - Markers written before payload-digest enforcement are deduplicated during their remaining TTL but cannot be checked for body reuse; new markers enforce payload matching.
 - Opt-out wording is checked before the lead is persisted. A tenant-scoped email/phone suppression key is stored in the same transaction and blocks outreach actions across future matching leads. The sender must still synchronize consent/opt-out state with its own CRM; no outbound message is sent.
 
-This generic webhook is the first integration adapter. Vendor OAuth sync, source-system field mapping, bidirectional updates, delivery receipts, and connector health dashboards remain separate work.
+This generic webhook is one inbound adapter. Zoho CRM OAuth and outcome-writeback code are present; customer-specific field mapping UX, provider validation, broader CRM support, delivery-receipt operations, and connector health dashboards remain separate work.
 
 ## Recommended first-pilot connector: Zoho CRM + WhatsApp Business Platform
 
-This is the current default for an India-based SMB pilot, subject to confirmation by the design partner. It is a working candidate, not a claim that either integration exists in the application. Zoho CRM exposes OAuth 2.0 delegated access and webhook configuration for record events; Zoho webhooks can send dynamic CRM fields and configured custom headers. See the [OAuth overview](https://www.zoho.com/crm/developer/docs/api/v8/oauth-overview.html) and [webhook configuration API](https://www.zoho.com/crm/developer/docs/api/v8/create-webhook.html). WhatsApp Business Platform provides a test/sandbox path and webhooks, while its [current messaging policy](https://whatsappbusiness.com/policy/) requires recipient permission, opt-out compliance, and approved templates to initiate conversations.
+This is the current default for an India-based SMB pilot, subject to confirmation by the design partner. Zoho create/edit intake and OAuth are implemented; mapped outcome writeback is implemented on an unmerged branch. None of these statements imply successful customer-account or staging validation. Zoho CRM exposes OAuth 2.0 delegated access and webhook configuration for record events; Zoho webhooks can send dynamic CRM fields and configured custom headers. See the [OAuth overview](https://www.zoho.com/crm/developer/docs/api/v8/oauth-overview.html) and [webhook configuration API](https://www.zoho.com/crm/developer/docs/api/v8/create-webhook.html). WhatsApp Business Platform provides a test/sandbox path and webhooks, while its [current messaging policy](https://whatsappbusiness.com/policy/) requires recipient permission, opt-out compliance, and approved templates to initiate conversations.
 
 ### Zoho CRM lead create and versioned edit intake (implemented; staging validation still required)
 
@@ -107,13 +107,28 @@ Configure a second Zoho workflow for lead edits to POST the same **complete snap
 
 Zoho is authoritative only for customer name, email, phone, source, and inquiry text in this direction. A change clears cached analysis and draft approval; a phone change also clears the stored WhatsApp consent binding. The sync preserves LeadRescue lifecycle and operator-entered sales outcomes, and it never sends a message or writes back to Zoho. These inbound endpoints do not provide CRM outcome writeback or live vendor validation. Do not enable them in production until payload interpolation, complete field behavior, retries, update ordering, and secret rotation have been observed against the pilot's sandbox.
 
-### Zoho OAuth connection (implemented locally; review, writeback, and sandbox validation pending)
+### Zoho CRM OAuth and outcome writeback (OAuth merged; outcome writeback under review; sandbox validation pending)
 
 Register a Zoho web-based OAuth client and register the exact HTTPS callback URI `https://<customer-api-host>/integrations/v1/zoho/oauth/callback`. Create a Secrets Manager secret and configure its ARN as `ZohoOAuthSecretArn`. The initial secret JSON must contain `client_id`, `client_secret`, `accounts_url`, and `redirect_uri`; the redirect value must exactly match the registered callback URI. `accounts_url` must be one of the supported regional Accounts origins in `zoho_oauth.py`. Keep this secret separate from `ZohoWebhookSecretArn` and do not place it in browser configuration.
 
-An authenticated company administrator can call `POST /api/integrations/zoho/authorize`; it returns the Zoho authorization URL. Open that URL in the administrator's browser and complete consent for the selected Zoho organization. The callback validates a random, single-use state saved for ten minutes in DynamoDB, exchanges the short-lived grant, and writes the refresh token and returned API domain back to the configured secret. `GET /api/integrations/zoho/status` reports whether a refresh token is configured and its region; it does not prove that the token is still valid and never returns credentials. Token refresh uses the configured regional Accounts URL and caches the short-lived access token only in the current Lambda process. The requested scope is limited to `ZohoCRM.modules.leads.UPDATE`.
+An authenticated company administrator can call `POST /api/integrations/zoho/authorize`; it returns the Zoho authorization URL. Open that URL in the administrator's browser and complete consent for the selected Zoho organization. The callback validates a random, single-use state saved for ten minutes in DynamoDB, exchanges the short-lived grant, and writes the refresh token and returned API domain back to the configured secret. `GET /api/integrations/zoho/status` reports whether a refresh token is configured and its region; it does not prove that the token is still valid and never returns credentials. Token refresh uses the configured regional Accounts URL and caches the short-lived access token only in the current Lambda process. The requested scopes are `ZohoCRM.modules.leads.READ` and `ZohoCRM.modules.leads.UPDATE`; the read scope retrieves the CRM record version before a conditional outcome update.
 
-The admin settings view now provides connection status and an authorization-link flow. The application has no disconnect/revocation workflow and no CRM outcome mapping/writeback worker yet. The OAuth flow is implemented locally and has automated test coverage, but has not been reviewed/merged or validated against Zoho. Review the account region, organization/environment selection, scope grant, callback behavior, token rotation, API domain, and revocation behavior with the pilot account before enabling CRM writes.
+The admin settings view provides connection status and an authorization-link flow. To enable outcome writeback, add `outcome_writeback_enabled: true` and `outcome_field_mapping` to the same secret. The mapping must contain an `outcome` key and may map `sales_value`, `sales_currency`, `reason`, and `recorded_at` to distinct Zoho field API names. Every target must be a writable custom field in the Leads module; do not map core contact, ownership, status, or version fields. Mapped optional values are sent as JSON `null` when absent to clear stale CRM values; verify clear behavior and field types in the customer's sandbox before enabling this. Test names, types, picklist values, permissions, and conflicts there first. Operator outcome and outbox event persist atomically; a DynamoDB stream worker reads the linked Zoho record's `Modified_Time`, then sends only configured outcome fields with `If-Unmodified-Since`. Conflicts and permanent provider rejections are shown on the lead; transient errors retry and are sent to the failure queue after the stream retry limit. A newer local outcome supersedes an older queued event, and privacy holds/opt-outs prevent pending updates. The application still has no disconnect/revocation workflow. OAuth and writeback have automated test coverage but are not live-sandbox validated. Review the account region, organization/environment selection, scopes, callback behavior, token rotation, field mappings, API domain, and revocation behavior with the pilot account before enabling CRM writes.
+
+Example shape only; replace every field API name with a verified field from the customer's Zoho Leads module:
+
+```json
+{
+  "outcome_writeback_enabled": true,
+  "outcome_field_mapping": {
+    "outcome": "LeadRescue_Outcome",
+    "sales_value": "LeadRescue_Sales_Value",
+    "sales_currency": "LeadRescue_Sales_Currency",
+    "reason": "LeadRescue_Outcome_Reason",
+    "recorded_at": "LeadRescue_Outcome_Recorded_At"
+  }
+}
+```
 
 ### Meta WhatsApp consent, delivery, and receipts (code implemented; sandbox evidence pending)
 

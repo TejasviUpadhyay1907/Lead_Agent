@@ -116,6 +116,12 @@ class Lead(LeadBase):
     sales_currency: Optional[str] = Field(default=None, pattern=r"^[A-Z]{3}$")
     sales_outcome_reason: Optional[str] = Field(default=None, max_length=500)
     sales_outcome_at: Optional[str] = None
+    # CRM writeback status is operator-visible and changes only when an outbox
+    # event matching crm_sync_event_id completes.
+    crm_sync_status: Optional[Literal["pending", "synced", "conflict", "failed"]] = None
+    crm_sync_event_id: Optional[str] = None
+    crm_sync_updated_at: Optional[str] = None
+    crm_sync_error_code: Optional[str] = None
     # Durable worker idempotency marker, updated atomically with analysis results.
     last_analysis_job_id: Optional[str] = None
 

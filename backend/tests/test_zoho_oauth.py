@@ -1,4 +1,5 @@
 from urllib.parse import parse_qs, urlsplit
+from urllib.request import Request
 
 import pytest
 from botocore.exceptions import ClientError
@@ -28,7 +29,7 @@ def test_authorization_url_uses_offline_lead_update_scope_and_single_use_state(m
     query = parse_qs(urlsplit(url).query)
 
     assert query == {
-        "scope": ["ZohoCRM.modules.leads.UPDATE"],
+        "scope": ["ZohoCRM.modules.leads.READ,ZohoCRM.modules.leads.UPDATE"],
         "client_id": ["client-id"],
         "response_type": ["code"],
         "access_type": ["offline"],
@@ -72,7 +73,7 @@ def test_token_exchange_keeps_credentials_in_post_body_and_checks_api_domain(mon
         captured["timeout"] = timeout
         return Response()
 
-    monkeypatch.setattr(zoho_oauth, "urlopen", fake_urlopen)
+    monkeypatch.setattr(zoho_oauth, "_urlopen_no_redirect", fake_urlopen)
     response = zoho_oauth.exchange_authorization_code(_config(), "grant-code")
 
     assert response["refresh_token"] == "refresh"
@@ -225,3 +226,11 @@ def test_oauth_state_is_hashed_and_claimed_once(monkeypatch):
     assert table.item["requested_by"] == "admin-sub"
     assert zoho_oauth._claim_oauth_state(state) is True
     assert zoho_oauth._claim_oauth_state(state) is False
+
+
+def test_oauth_token_handler_rejects_redirects_without_forwarding_request_body():
+    request = Request("https://accounts.zoho.in/oauth/v2/token", data=b"client_secret=private")
+    redirected = zoho_oauth._RejectRedirects().redirect_request(
+        request, None, 307, "Temporary Redirect", {}, "https://attacker.example/token"
+    )
+    assert redirected is None

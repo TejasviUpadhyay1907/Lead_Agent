@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { BadgeCheck, Save } from 'lucide-react';
 import { api } from '../../api/client';
 import { humanize, safeError } from '../../api/presentation';
@@ -11,6 +11,11 @@ export function OutcomeTracker({ lead, onSaved }) {
     const [reason, setReason] = useState(lead.sales_outcome_reason || '');
     const [saving, setSaving] = useState(false);
     const [notice, setNotice] = useState(null);
+    const onSavedRef = useRef(onSaved);
+
+    useEffect(() => {
+        onSavedRef.current = onSaved;
+    }, [onSaved]);
 
     useEffect(() => {
         setOutcome(lead.sales_outcome || '');
@@ -18,6 +23,22 @@ export function OutcomeTracker({ lead, onSaved }) {
         setCurrency(lead.sales_currency || '');
         setReason(lead.sales_outcome_reason || '');
     }, [lead.lead_id, lead.sales_outcome, lead.sales_value, lead.sales_currency, lead.sales_outcome_reason]);
+
+    useEffect(() => {
+        if (lead.crm_sync_status !== 'pending') return undefined;
+        let attempts = 0;
+        const timer = window.setInterval(async () => {
+            attempts += 1;
+            try {
+                const current = await api.getLead(lead.lead_id);
+                onSavedRef.current(current);
+                if (current.crm_sync_status !== 'pending' || attempts >= 12) window.clearInterval(timer);
+            } catch {
+                if (attempts >= 12) window.clearInterval(timer);
+            }
+        }, 5000);
+        return () => window.clearInterval(timer);
+    }, [lead.lead_id, lead.crm_sync_event_id, lead.crm_sync_status]);
 
     const blocked = lead.privacy_hold || lead.lifecycle_status === 'opted_out';
     const needsReason = ['lost', 'disqualified'].includes(outcome);
@@ -36,7 +57,9 @@ export function OutcomeTracker({ lead, onSaved }) {
             }
             const updated = await api.updateSalesOutcome(lead.lead_id, payload);
             onSaved(updated);
-            setNotice({ tone: 'success', text: 'Outcome recorded in the audit history. CRM sync is not connected.' });
+            setNotice({ tone: 'success', text: updated.crm_sync_status === 'pending'
+                ? 'Outcome recorded. Zoho CRM writeback is queued.'
+                : 'Outcome recorded in the audit history.' });
         } catch (error) {
             setNotice({ tone: 'error', text: safeError(error, 'The outcome could not be saved. Refresh the lead before retrying.') });
         } finally {
@@ -54,6 +77,13 @@ export function OutcomeTracker({ lead, onSaved }) {
                     {lead.sales_value != null && lead.sales_currency && <> · {lead.sales_currency} {lead.sales_value}</>}
                     {lead.sales_outcome_at && <> · {new Date(lead.sales_outcome_at).toLocaleString()}</>}
                 </p>
+            )}
+            {lead.crm_sync_status && (
+                <div className={`crm-sync-state crm-sync-${lead.crm_sync_status}`} role="status" aria-live="polite">
+                    <strong>Zoho sync: {humanize(lead.crm_sync_status)}</strong>
+                    {lead.crm_sync_error_code && <span>{humanize(lead.crm_sync_error_code.replaceAll('_', ' '))}. Review the CRM record and mapping before retrying.</span>}
+                    {lead.crm_sync_updated_at && <small>Updated {new Date(lead.crm_sync_updated_at).toLocaleString()}</small>}
+                </div>
             )}
             {blocked ? (
                 <p className="form-note">Outcome changes are paused for this lead by a privacy or opt-out safeguard.</p>
@@ -87,7 +117,7 @@ export function OutcomeTracker({ lead, onSaved }) {
                             {saving ? <BusyLabel>Saving outcome…</BusyLabel> : <><Save size={15} aria-hidden="true" /> Record outcome</>}
                         </button>
                     </div>
-                    <p className="form-note">This is a manually recorded outcome. It is not synced to a CRM and does not by itself prove revenue attribution.</p>
+                    <p className="form-note">This result is operator-entered. If the linked Zoho record and writeback mapping are configured, the update is sent asynchronously; confirmed deal value is not independently verified revenue attribution.</p>
                 </form>
             )}
         </section>

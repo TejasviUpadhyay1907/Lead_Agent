@@ -67,6 +67,7 @@ class LeadsRepository:
     def __init__(self, use_memory: bool = False):
         self.use_memory = use_memory or settings.demo_enabled
         self._memory_store: Dict[str, Lead] = {}
+        self._memory_outbox: List[dict] = []
         self._memory_suppressions: set[str] = set()
         self._table = None
         self._suppressions_table = None
@@ -358,7 +359,7 @@ class LeadsRepository:
 
     def save_workflow(
         self, lead: Lead, followups: Sequence[FollowUp], audits: Sequence[AuditEvent],
-        followups_repo, audit_repo, expected_updated_at: str,
+        followups_repo, audit_repo, expected_updated_at: str, outbox_item: Optional[dict] = None,
     ) -> Lead:
         """Atomically commit a lead plus related follow-up and audit records."""
         lead.updated_at = _next_updated_at(expected_updated_at)
@@ -376,6 +377,8 @@ class LeadsRepository:
                 followups_repo._memory_store[followup.followup_id] = followup
             for audit in audits:
                 audit_repo.store(audit)
+            if outbox_item:
+                self._memory_outbox.append(dict(outbox_item))
             return lead
         if (followups and (not followups_repo or followups_repo.use_memory or not followups_repo._table)) or audit_repo.use_memory or not audit_repo._table:
             raise RuntimeError("Workflow records must use the same persistent storage mode")
@@ -409,6 +412,14 @@ class LeadsRepository:
             }
         } for audit in audits)
         transactions.extend(self._suppression_transaction_items(lead))
+        if outbox_item:
+            transactions.append({
+                "Put": {
+                    "TableName": settings.zoho_writeback_outbox_table,
+                    "Item": _serialize_item(outbox_item),
+                    "ConditionExpression": "attribute_not_exists(event_id)",
+                }
+            })
         try:
             self._table.meta.client.transact_write_items(TransactItems=transactions)
         except ClientError as exc:
