@@ -81,9 +81,9 @@ This generic webhook is the first integration adapter. Vendor OAuth sync, source
 
 This is the current default for an India-based SMB pilot, subject to confirmation by the design partner. It is a working candidate, not a claim that either integration exists in the application. Zoho CRM exposes OAuth 2.0 delegated access and webhook configuration for record events; Zoho webhooks can send dynamic CRM fields and configured custom headers. See the [OAuth overview](https://www.zoho.com/crm/developer/docs/api/v8/oauth-overview.html) and [webhook configuration API](https://www.zoho.com/crm/developer/docs/api/v8/create-webhook.html). WhatsApp Business Platform provides a test/sandbox path and webhooks, while its [current messaging policy](https://whatsappbusiness.com/policy/) requires recipient permission, opt-out compliance, and approved templates to initiate conversations.
 
-### Zoho CRM lead-create intake (implemented; staging validation still required)
+### Zoho CRM lead create and versioned edit intake (implemented; staging validation still required)
 
-`POST /integrations/v1/zoho/leads` accepts a strict mapped JSON body and a dedicated `X-LeadRescue-Token` header. Set `ZohoWebhookSecretArn` at deployment to a separate Secrets Manager secret containing a random token of at least 32 characters (plain secret string or JSON `{"token":"..."}`). Leave the parameter empty to disable this route; do not reuse the generic HMAC webhook secret. The Lambda role receives read access only to the configured Zoho secret. Rotate by updating the secret and account for the one-minute in-process cache before removing the old token.
+`POST /integrations/v1/zoho/leads` accepts a strict mapped JSON body and a dedicated `X-LeadRescue-Token` header. Set `ZohoWebhookSecretArn` at deployment to a separate Secrets Manager secret containing a random token of at least 32 characters (plain secret string or JSON `{"token":"..."}`). Leave the parameter empty to disable these routes; do not reuse the generic HMAC webhook secret. The Lambda role receives read access only to the configured Zoho secret. Rotate by updating the secret and account for the one-minute in-process cache before removing the old token.
 
 Configure a Zoho CRM webhook with method `POST`, raw JSON body, and a custom header named `X-LeadRescue-Token`. A representative mapping is:
 
@@ -94,11 +94,16 @@ Configure a Zoho CRM webhook with method `POST`, raw JSON body, and a custom hea
   "customer_email": "${!Leads.Email}",
   "customer_phone": "${!Leads.Phone}",
   "source": "website",
-  "message": "${!Leads.Description}"
+  "message": "${!Leads.Description}",
+  "modified_at": "${!Leads.Modified_Time}"
 }
 ```
 
-Set the `source` value to one supported LeadRescue source for that workflow. Map `message` to a required field that contains the actual inquiry; do not use an invented placeholder, since that would mislead analysis and operators. Configure the Zoho workflow rule to trigger only when a lead is created. The API permanently deduplicates by tenant + Zoho record ID: identical retries return the original local lead, while a changed payload for the same ID returns `409` and never creates a second lead. This route ingests a new lead; it does not import updates to an existing Zoho lead, write changes back to Zoho, or provide OAuth-based connection management. Do not enable the route in production until the mapped webhook body, field escaping, secret rotation, retry behavior, and event behavior have been observed against the pilot's Zoho sandbox.
+Set `source` to one supported LeadRescue source for that workflow. Map `message` to the actual inquiry; do not use an invented placeholder. Include Zoho's timezone-qualified ISO 8601 `Modified_Time` so the permanent tenant + record marker can order later snapshots. Zoho documents Modified_Time as ISO 8601 and supports module-field merge values in webhook payloads; confirm the exact outgoing body against the partner sandbox before deployment. If a create marker predates source-version storage, replaying an identical mapped create snapshot can backfill its version; a changed payload is rejected and needs operator reconciliation.
+
+Configure a second Zoho workflow for lead edits to POST the same **complete snapshot** to `POST /integrations/v1/zoho/leads/updates`, with the same dedicated header. `customer_email` and `customer_phone` must both be present; send JSON `null` to explicitly clear either. The update endpoint requires a timezone-aware `modified_at`, rejects unknown Zoho records, ignores older snapshots, treats identical same-version retries idempotently, and rejects conflicting data for the same source version. The lead, audit event, suppression checks, privacy hold/request, and source-version advance are written atomically. If the source changes concurrently, it returns `409` so the newest complete snapshot can be retried.
+
+Zoho is authoritative only for customer name, email, phone, source, and inquiry text in this direction. A change clears cached analysis and draft approval; a phone change also clears the stored WhatsApp consent binding. The sync preserves LeadRescue lifecycle and operator-entered sales outcomes, and it never sends a message or writes back to Zoho. These endpoints do not provide OAuth-based connection management, CRM outcome writeback, or live vendor validation. Do not enable them in production until payload interpolation, complete field behavior, retries, update ordering, and secret rotation have been observed against the pilot's sandbox.
 
 ### Meta WhatsApp consent, delivery, and receipts (code implemented; sandbox evidence pending)
 

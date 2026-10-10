@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from botocore.exceptions import ClientError
@@ -9,9 +10,12 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.api import webhooks
+from app.integrations import persistence as integration_persistence
+from app.integrations import zoho
 from app.main import app
 from app.models.audit import AuditEvent
 from app.models.lead import Lead
+from app.models.enums import IntentEnum, LifecycleStatusEnum, PriorityEnum, ResponseStatusEnum, SalesOutcomeEnum, UrgencyEnum
 
 
 def _signed_headers(body: bytes, *, timestamp: str | None = None, provider: str = "generic", event_id: str = "event-123"):
@@ -167,6 +171,7 @@ def test_zoho_ingest_authenticates_maps_and_uses_permanent_record_dedupe(monkeyp
         "customer_phone": "+91-9000000000",
         "source": "website",
         "message": "Please send a quote for 20 units.",
+        "modified_at": datetime.now(timezone.utc).isoformat(),
     }).encode()
     monkeypatch.setattr(webhooks, "_verify_zoho_token", lambda token: None)
     persisted = {}
@@ -197,7 +202,241 @@ def test_zoho_ingest_authenticates_maps_and_uses_permanent_record_dedupe(monkeyp
         source="website",
         message="Please send a quote for 20 units.",
     ).model_dump_json().encode()).hexdigest()
-    assert persisted["kwargs"] == {"permanent_idempotency": True}
+    assert persisted["kwargs"] == {
+        "permanent_idempotency": True,
+        "source_modified_at": webhooks.ZohoLeadWebhook.model_validate_json(body).modified_at.isoformat(),
+    }
+
+
+def test_zoho_update_snapshot_schema_requires_complete_contact_fields_and_zoned_time():
+    baseline = {
+        "record_id": "5725767000000123456",
+        "customer_name": "Asha Rao",
+        "customer_email": None,
+        "customer_phone": "+91-9000000000",
+        "source": "website",
+        "message": "Need a quote",
+        "modified_at": datetime.now(timezone.utc).isoformat(),
+    }
+    parsed = webhooks.ZohoLeadUpdateWebhook.model_validate(baseline)
+    assert parsed.customer_email is None
+    assert parsed.modified_at.tzinfo is not None
+
+    missing_contact = {**baseline}
+    del missing_contact["customer_email"]
+    with pytest.raises(ValueError, match="must be present"):
+        webhooks.ZohoLeadUpdateWebhook.model_validate(missing_contact)
+
+    naive_time = {**baseline, "modified_at": "2026-10-10T12:00:00"}
+    with pytest.raises(ValueError, match="timezone offset"):
+        webhooks.ZohoLeadUpdateWebhook.model_validate(naive_time)
+
+    future_time = {**baseline, "modified_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()}
+    with pytest.raises(ValueError, match="cannot be in the future"):
+        webhooks.ZohoLeadUpdateWebhook.model_validate(future_time)
+
+
+def test_zoho_update_route_authenticates_and_hashes_normalized_snapshot(monkeypatch):
+    body = {
+        "record_id": "5725767000000123456",
+        "customer_name": "Asha Rao",
+        "customer_email": "asha@example.com",
+        "customer_phone": "+91-9000000000",
+        "source": "website",
+        "message": "Need a quote",
+        "modified_at": datetime.now(timezone.utc).isoformat(),
+    }
+    verified = []
+    submitted = {}
+    monkeypatch.setattr(webhooks, "_verify_zoho_token", lambda token: verified.append(token))
+
+    def apply_snapshot(payload, payload_digest):
+        submitted["payload"] = payload
+        submitted["digest"] = payload_digest
+        return webhooks.JSONResponse(status_code=200, content={"accepted": True})
+
+    monkeypatch.setattr(webhooks, "apply_lead_snapshot", apply_snapshot)
+    response = TestClient(app).post(
+        "/integrations/v1/zoho/leads/updates",
+        json=body,
+        headers={"X-LeadRescue-Token": "test-token"},
+    )
+
+    assert response.status_code == 200
+    assert verified == ["test-token"]
+    assert submitted["payload"].record_id == body["record_id"]
+    expected = webhooks.InboundLead(
+        customer_name=body["customer_name"],
+        customer_email=body["customer_email"],
+        customer_phone=body["customer_phone"],
+        source=body["source"],
+        message=body["message"],
+    )
+    assert submitted["digest"] == hashlib.sha256(expected.model_dump_json().encode("utf-8")).hexdigest()
+
+
+class _FakeZohoTable:
+    def __init__(self, *, item=None):
+        self.item = item
+
+    def get_item(self, Key, **_kwargs):
+        key = next(iter(Key.values()))
+        if key in {"migration", "history"}:
+            return {"Item": {"index_key_scheme": "hmac-sha256-v1", "index_key_id": "key-v1"}}
+        return {"Item": self.item} if self.item else {}
+
+
+class _FakeZohoDynamo:
+    def __init__(self, event, lead, *, fail_transaction=False):
+        self.tables = {
+            "test-events": _FakeZohoTable(item=event),
+            "test-leads": _FakeZohoTable(item=lead),
+            "test-suppressions": _FakeZohoTable(),
+        }
+        self.meta = type("Meta", (), {})()
+        self.meta.client = self
+        self.fail_transaction = fail_transaction
+        self.transact_items = None
+
+    def Table(self, name):
+        return self.tables[name]
+
+    def transact_write_items(self, *, TransactItems):
+        self.transact_items = TransactItems
+        if self.fail_transaction:
+            raise ClientError({"Error": {"Code": "TransactionCanceledException", "Message": "condition failed"}}, "TransactWriteItems")
+
+
+def _patch_zoho_update_dynamo(monkeypatch, fake):
+    monkeypatch.setattr(zoho, "get_boto3_dynamodb_resource", lambda: fake)
+    monkeypatch.setattr(zoho, "require_customer_index_key", lambda: "key-v1")
+    monkeypatch.setattr(zoho, "migration_marker_key", lambda _tenant: "migration")
+    monkeypatch.setattr(zoho, "history_index_marker_key", lambda _tenant: "history")
+    monkeypatch.setattr(zoho, "suppression_keys", lambda *_args: ["email#keyed", "phone#keyed"])
+
+    class TestSettings:
+        effective_tenant_id = "tenant-test"
+        customer_suppressions_table = "test-suppressions"
+        processed_events_table = "test-events"
+        leads_table = "test-leads"
+        audit_table = "test-audit"
+        privacy_requests_table = "test-privacy"
+
+    monkeypatch.setattr(zoho, "settings", TestSettings())
+    monkeypatch.setattr(integration_persistence, "settings", TestSettings())
+    monkeypatch.setattr(integration_persistence, "suppression_keys", lambda *_args: ["email#keyed", "phone#keyed"])
+
+
+def test_zoho_newer_snapshot_updates_crm_fields_invalidates_stale_ai_and_preserves_operator_state(monkeypatch):
+    now = datetime.now(timezone.utc)
+    lead = Lead(
+        lead_id="local-lead",
+        tenant_id="tenant-test",
+        customer_name="Asha Rao",
+        customer_email="asha@example.com",
+        customer_phone="+91-9000000000",
+        source="website",
+        raw_message="Need a quote",
+        intent=IntentEnum.PURCHASE,
+        urgency=UrgencyEnum.HIGH,
+        ai_summary="Old summary",
+        response_draft="Old draft",
+        score=90,
+        priority=PriorityEnum.HOT,
+        lifecycle_status=LifecycleStatusEnum.CONTACTED,
+        response_status=ResponseStatusEnum.APPROVED,
+        approved_draft_sha256="a" * 64,
+        approval_attested_at=now.isoformat(),
+        approval_attested_by="operator-1",
+        sales_outcome=SalesOutcomeEnum.WON,
+    )
+    prior_source_time = (now - timedelta(minutes=2)).isoformat()
+    event_digest = hashlib.sha256(b"zoho-crm:5725767000000123456").hexdigest()
+    event = {
+        "event_key": f"tenant-test#{event_digest}",
+        "tenant_id": "tenant-test",
+        "provider": "zoho-crm",
+        "lead_id": lead.lead_id,
+        "source_modified_at": prior_source_time,
+        "payload_digest": "old-digest",
+    }
+    fake = _FakeZohoDynamo(event, lead.model_dump())
+    _patch_zoho_update_dynamo(monkeypatch, fake)
+    payload = webhooks.ZohoLeadUpdateWebhook.model_validate({
+        "record_id": "5725767000000123456",
+        "customer_name": "Asha Rao Updated",
+        "customer_email": "asha.new@example.com",
+        "customer_phone": "+91-9111111111",
+        "source": "email",
+        "message": "Please quote 30 units",
+        "modified_at": (now - timedelta(minutes=1)).isoformat(),
+    })
+
+    snapshot = webhooks.InboundLead(
+        customer_name=payload.customer_name,
+        customer_email=payload.customer_email,
+        customer_phone=payload.customer_phone,
+        source=payload.source,
+        message=payload.message,
+    )
+    payload_digest = hashlib.sha256(snapshot.model_dump_json().encode("utf-8")).hexdigest()
+    response = zoho.apply_lead_snapshot(payload, payload_digest)
+    assert response.status_code == 200
+    body = json.loads(response.body)
+    assert body["updated"] is True
+    assert set(body["changed_fields"]) == {"customer_name", "customer_email", "customer_phone", "source", "raw_message"}
+    assert len(fake.transact_items) == 5
+    updated_item = fake.transact_items[0]["Put"]["Item"]
+    assert updated_item["customer_name"]["S"] == "Asha Rao Updated"
+    assert updated_item["lifecycle_status"]["S"] == "contacted"
+    assert updated_item["sales_outcome"]["S"] == "won"
+    assert updated_item["response_draft"]["NULL"] is True
+    assert updated_item["approved_draft_sha256"]["NULL"] is True
+    assert updated_item["whatsapp_consent"]["NULL"] is True
+    assert updated_item["score"]["NULL"] is True
+    assert fake.transact_items[2]["Update"]["UpdateExpression"].startswith("SET source_modified_at")
+
+
+def test_zoho_update_rejects_legacy_binding_and_ignores_stale_snapshot(monkeypatch):
+    now = datetime.now(timezone.utc)
+    lead = Lead(lead_id="local-lead", tenant_id="tenant-test", customer_name="Asha", source="website", raw_message="Quote")
+    event_digest = hashlib.sha256(b"zoho-crm:record-1").hexdigest()
+    event = {
+        "event_key": f"tenant-test#{event_digest}",
+        "tenant_id": "tenant-test",
+        "provider": "zoho-crm",
+        "lead_id": lead.lead_id,
+        "source_modified_at": (now - timedelta(minutes=1)).isoformat(),
+        "payload_digest": "old-digest",
+    }
+    payload = webhooks.ZohoLeadUpdateWebhook.model_validate({
+        "record_id": "record-1",
+        "customer_name": "Asha Older",
+        "customer_email": None,
+        "customer_phone": None,
+        "source": "website",
+        "message": "Old snapshot",
+        "modified_at": (now - timedelta(minutes=2)).isoformat(),
+    })
+    fake = _FakeZohoDynamo(event, lead.model_dump())
+    _patch_zoho_update_dynamo(monkeypatch, fake)
+    snapshot = webhooks.InboundLead(
+        customer_name=payload.customer_name,
+        customer_email=payload.customer_email,
+        customer_phone=payload.customer_phone,
+        source=payload.source,
+        message=payload.message,
+    )
+    payload_digest = hashlib.sha256(snapshot.model_dump_json().encode("utf-8")).hexdigest()
+    response = zoho.apply_lead_snapshot(payload, payload_digest)
+    assert response.status_code == 200
+    assert json.loads(response.body)["stale"] is True
+    assert fake.transact_items is None
+
+    del event["source_modified_at"]
+    with pytest.raises(HTTPException) as exc:
+        zoho.apply_lead_snapshot(payload, payload_digest)
+    assert exc.value.status_code == 409
 
 
 def test_zoho_ingest_rejects_auth_and_incomplete_mapped_records(monkeypatch):
@@ -227,6 +466,11 @@ class _FakeTable:
         if self.name == "test-events":
             return {"Item": self.event} if self.event else {}
         return {}
+
+    def update_item(self, *, Key, ExpressionAttributeValues, **_kwargs):
+        if self.name != "test-events" or not self.event or self.event.get("event_key") != Key["event_key"]:
+            raise AssertionError("Unexpected fake event marker update")
+        self.event["source_modified_at"] = ExpressionAttributeValues[":source_time"]
 
 
 class _FakeDynamo:
@@ -265,6 +509,8 @@ def _patch_fake_dynamo(monkeypatch, fake):
         audit_table = "test-audit"
 
     monkeypatch.setattr(webhooks, "settings", TestSettings())
+    monkeypatch.setattr(integration_persistence, "settings", TestSettings())
+    monkeypatch.setattr(integration_persistence, "suppression_keys", lambda *_args: [])
 
 
 def test_persistence_commits_lead_audit_and_dedupe_marker_together(monkeypatch):
@@ -295,12 +541,44 @@ def test_permanent_external_record_marker_does_not_expire(monkeypatch):
         "event-digest",
         "payload-digest",
         permanent_idempotency=True,
+        source_modified_at="2026-10-10T12:00:00+00:00",
     )
 
     marker = fake.transact_items[2]["Put"]["Item"]
     assert response.status_code == 201
     assert marker["provider"]["S"] == "zoho-crm"
+    assert marker["source_modified_at"]["S"] == "2026-10-10T12:00:00+00:00"
     assert "expires_at" not in marker
+
+
+def test_zoho_replay_backfills_missing_source_version_only_for_identical_payload(monkeypatch):
+    event = {
+        "event_key": "tenant-test#external-record",
+        "tenant_id": "tenant-test",
+        "provider": "zoho-crm",
+        "payload_digest": "same-payload",
+        "lead_id": "existing-lead",
+    }
+    fake = _FakeDynamo(fail_transaction=True, event=event)
+    _patch_fake_dynamo(monkeypatch, fake)
+    lead = Lead(customer_name="Asha Rao", source="website", raw_message="Need a quote", tenant_id="tenant-test")
+    event_marker = fake.tables["test-events"]
+    # The event marker is known; this create replay may backfill its missing source version.
+    digest = "same-payload"
+    response = webhooks._create_or_return_duplicate(
+        lead,
+        AuditEvent(lead_id=lead.lead_id, tenant_id="tenant-test", tenant_lead_id=f"tenant-test#{lead.lead_id}", action="lead_received", actor="integration:zoho-crm"),
+        "tenant-test#external-record",
+        "zoho-crm",
+        "event-digest",
+        digest,
+        permanent_idempotency=True,
+        source_modified_at="2026-10-10T12:00:00+00:00",
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.body)["duplicate"] is True
+    assert event_marker.event["source_modified_at"] == "2026-10-10T12:00:00+00:00"
 
 
 @pytest.mark.parametrize(
