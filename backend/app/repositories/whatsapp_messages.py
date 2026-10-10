@@ -10,6 +10,7 @@ from app.config.settings import settings
 from app.models.audit import AuditEvent, AuditEventCreate
 from app.models.whatsapp_message import WhatsAppDeliveryStatus, WhatsAppMessage, now_iso
 from app.repositories.base import get_boto3_dynamodb_resource
+from app.repositories.pagination import decode_cursor, encode_cursor
 
 _serializer = TypeSerializer()
 _STATUS_RANK = {"sent": 1, "delivered": 2, "read": 3, "failed": 4}
@@ -79,6 +80,37 @@ class WhatsAppMessagesRepository:
             Limit=limit,
         )
         return [WhatsAppMessage(**item) for item in response.get("Items", [])]
+
+    def list_for_lead_page(
+        self, lead_id: str, limit: int = 50, cursor: Optional[str] = None
+    ) -> tuple[list[WhatsAppMessage], Optional[str]]:
+        """Read one bounded page of messages for a tenant-scoped lead."""
+        filters = {"tenant_id": settings.effective_tenant_id, "lead_id": lead_id}
+        state = decode_cursor(cursor, filters, {"tenant_lead_key", "created_at", "message_id"})
+        if self._table is None:
+            items = [
+                item for item in self._memory.values()
+                if item.tenant_id == settings.effective_tenant_id and item.lead_id == lead_id
+            ]
+            items.sort(key=lambda row: (row.created_at, row.message_id))
+            offset = state.get("offset", 0)
+            page = items[offset:offset + limit]
+            next_cursor = encode_cursor({"offset": offset + len(page), "filter": filters}) if offset + len(page) < len(items) else None
+            return [item.model_copy(deep=True) for item in page], next_cursor
+
+        query = {
+            "IndexName": "tenant-lead-created-index",
+            "KeyConditionExpression": Key("tenant_lead_key").eq(f"{settings.effective_tenant_id}#{lead_id}"),
+            "ScanIndexForward": True,
+            "Limit": limit,
+        }
+        if state.get("last_key"):
+            query["ExclusiveStartKey"] = state["last_key"]
+        response = self._table.query(**query)
+        page = [WhatsAppMessage(**item) for item in response.get("Items", [])]
+        last_key = response.get("LastEvaluatedKey")
+        next_cursor = encode_cursor({"last_key": last_key, "filter": filters}) if last_key else None
+        return page, next_cursor
 
     def all_for_lead(self, lead_id: str) -> list[WhatsAppMessage]:
         if self._table is None:

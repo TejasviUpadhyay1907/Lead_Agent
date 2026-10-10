@@ -270,31 +270,50 @@ def _collect_lead_record(
     followups_repo: FollowUpsRepository,
     audit_repo: AuditRepository,
     whatsapp_repo: WhatsAppMessagesRepository,
+    max_bytes: int = MAX_PRIVACY_BUNDLE_BYTES,
 ) -> dict:
-    """Collect one lead and all locally stored related records."""
-    followups = []
+    """Collect related records page by page and stop before exceeding the bundle budget."""
+    record = {
+        "lead": lead.model_dump(mode="json"),
+        "followups": [],
+        "audit_events": [],
+        "whatsapp_messages": [],
+    }
+    current_size = len(json.dumps(record, ensure_ascii=False).encode("utf-8"))
+
+    def append_bounded(destination: list, items: list) -> None:
+        nonlocal current_size
+        for item in items:
+            serialized = item.model_dump(mode="json")
+            current_size += len(json.dumps(serialized, ensure_ascii=False).encode("utf-8")) + 1
+            if current_size > max_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail="The matching data exceeds the export size limit. Use the paged record list and export individual records.",
+                )
+            destination.append(serialized)
+
     cursor = None
     while True:
         page, cursor = followups_repo.list_followups_page(limit=100, cursor=cursor, lead_id=lead.lead_id)
-        followups.extend(page)
+        append_bounded(record["followups"], page)
         if cursor is None:
             break
 
-    whatsapp_messages = whatsapp_repo.all_for_lead(lead.lead_id)
+    cursor = None
+    while True:
+        page, cursor = whatsapp_repo.list_for_lead_page(lead.lead_id, limit=100, cursor=cursor)
+        append_bounded(record["whatsapp_messages"], page)
+        if cursor is None:
+            break
 
-    events = []
     cursor = None
     while True:
         page, cursor = audit_repo.list_by_lead_page(lead.lead_id, limit=100, cursor=cursor)
-        events.extend(page)
+        append_bounded(record["audit_events"], page)
         if cursor is None:
             break
-    return {
-        "lead": lead.model_dump(mode="json"),
-        "followups": [item.model_dump(mode="json") for item in followups],
-        "audit_events": [item.model_dump(mode="json") for item in events],
-        "whatsapp_messages": [item.model_dump(mode="json") for item in whatsapp_messages],
-    }
+    return record
 
 
 def _json_download(payload: dict, filename: str) -> Response:
@@ -364,7 +383,10 @@ def export_privacy_request_bundle(
     current_size = 0
     related_counts = {"followups": 0, "audit_events": 0, "whatsapp_messages": 0}
     for lead in leads:
-        record = _collect_lead_record(lead, followups_repo, audit_repo, whatsapp_repo)
+        record = _collect_lead_record(
+            lead, followups_repo, audit_repo, whatsapp_repo,
+            max_bytes=MAX_PRIVACY_BUNDLE_BYTES - current_size,
+        )
         current_size += len(json.dumps(record, ensure_ascii=False).encode("utf-8"))
         if current_size > MAX_PRIVACY_BUNDLE_BYTES:
             raise HTTPException(
