@@ -29,6 +29,8 @@ from app.repositories.privacy_requests import (
 from app.repositories.whatsapp_messages import WhatsAppMessagesRepository
 
 router = APIRouter(prefix="/privacy", tags=["Privacy"])
+MAX_PRIVACY_BUNDLE_RECORDS = 100
+MAX_PRIVACY_BUNDLE_BYTES = 8 * 1024 * 1024
 
 
 class PrivacyRecordMatch(BaseModel):
@@ -235,7 +237,41 @@ def _export_lead_record(
     export_context: dict | None = None,
 ):
     """Build a no-store export for one lead and its complete local history."""
+    record = _collect_lead_record(lead, followups_repo, audit_repo, whatsapp_repo)
+    exported_at = datetime.now(timezone.utc).isoformat()
+    export_event = audit_repo.create(
+        AuditEventCreate(
+            lead_id=lead.lead_id,
+            action=audit_action,
+            actor=f"user:{operator['sub']}",
+            details={
+                **audit_details,
+                "followup_count": len(record["followups"]),
+                "audit_event_count": len(record["audit_events"]),
+                "whatsapp_message_count": len(record["whatsapp_messages"]),
+            },
+        )
+    )
+    record["audit_events"].append(export_event.model_dump(mode="json"))
+    payload = {
+        "schema_version": "1.0",
+        "exported_at": exported_at,
+        "tenant_id": settings.effective_tenant_id,
+        **record,
+    }
+    if export_context:
+        payload["export_context"] = export_context
+    safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", lead.lead_id)[:80] or "record"
+    return _json_download(payload, f"{filename_prefix}-{safe_id}-export.json")
 
+
+def _collect_lead_record(
+    lead,
+    followups_repo: FollowUpsRepository,
+    audit_repo: AuditRepository,
+    whatsapp_repo: WhatsAppMessagesRepository,
+) -> dict:
+    """Collect one lead and all locally stored related records."""
     followups = []
     cursor = None
     while True:
@@ -253,43 +289,137 @@ def _export_lead_record(
         events.extend(page)
         if cursor is None:
             break
-
-    exported_at = datetime.now(timezone.utc).isoformat()
-    export_event = audit_repo.create(
-        AuditEventCreate(
-            lead_id=lead.lead_id,
-            action=audit_action,
-            actor=f"user:{operator['sub']}",
-            details={
-                **audit_details,
-                "followup_count": len(followups),
-                "audit_event_count": len(events),
-                "whatsapp_message_count": len(whatsapp_messages),
-            },
-        )
-    )
-    payload = {
-        "schema_version": "1.0",
-        "exported_at": exported_at,
-        "tenant_id": settings.effective_tenant_id,
+    return {
         "lead": lead.model_dump(mode="json"),
         "followups": [item.model_dump(mode="json") for item in followups],
-        "audit_events": [item.model_dump(mode="json") for item in [*events, export_event]],
+        "audit_events": [item.model_dump(mode="json") for item in events],
         "whatsapp_messages": [item.model_dump(mode="json") for item in whatsapp_messages],
     }
-    if export_context:
-        payload["export_context"] = export_context
-    safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", lead.lead_id)[:80] or "record"
+
+
+def _json_download(payload: dict, filename: str) -> Response:
     return Response(
         content=json.dumps(payload, ensure_ascii=False),
         media_type="application/json",
         headers={
-            "Content-Disposition": f'attachment; filename="{filename_prefix}-{safe_id}-export.json"',
+            "Content-Disposition": f'attachment; filename="{filename}"',
             "Cache-Control": "private, no-store",
             "Pragma": "no-cache",
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+@router.get(
+    "/requests/{request_id}/export",
+    summary="Export all local records matching one verified access identifier",
+)
+def export_privacy_request_bundle(
+    request_id: str,
+    identifier_type: Literal["email", "phone"] = Query(..., alias="match"),
+    operator=Depends(require_roles(settings.admin_role)),
+    privacy_repo: PrivacyRequestsRepository = Depends(get_privacy_requests_repo),
+    leads_repo: LeadsRepository = Depends(get_leads_repo),
+    followups_repo: FollowUpsRepository = Depends(get_followups_repo),
+    audit_repo: AuditRepository = Depends(get_audit_repo),
+    whatsapp_repo: WhatsAppMessagesRepository = Depends(get_whatsapp_messages_repo),
+):
+    """Download a bounded bundle of all LeadRescue records for one verified identifier."""
+    privacy_request = privacy_repo.get_by_id(request_id)
+    if not privacy_request:
+        raise HTTPException(status_code=404, detail="Privacy request not found")
+    if privacy_request.request_type.value != "access":
+        raise HTTPException(status_code=409, detail="Data bundles are only available for access requests")
+    if privacy_request.status not in {PrivacyRequestStatus.VERIFIED, PrivacyRequestStatus.IN_PROGRESS}:
+        raise HTTPException(status_code=409, detail="Verify the request identity before exporting matching records")
+
+    source_lead = leads_repo.get_by_id(privacy_request.lead_id)
+    if not source_lead:
+        raise HTTPException(status_code=404, detail="Privacy request lead not found")
+    identifier = source_lead.customer_email if identifier_type == "email" else source_lead.customer_phone
+    if not identifier or not identifier.strip():
+        raise HTTPException(status_code=422, detail=f"The request record has no stored {identifier_type} to match")
+
+    try:
+        leads, next_cursor = leads_repo.find_customer_history_page(
+            identifier_type=identifier_type,
+            customer_email=source_lead.customer_email,
+            customer_phone=source_lead.customer_phone,
+            limit=MAX_PRIVACY_BUNDLE_RECORDS,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="The verified contact identifier could not be matched") from exc
+    if next_cursor:
+        raise HTTPException(
+            status_code=413,
+            detail=f"More than {MAX_PRIVACY_BUNDLE_RECORDS} records match this identifier. Use the paged record list and export individual records.",
+        )
+    if all(lead.lead_id != source_lead.lead_id for lead in leads):
+        if len(leads) >= MAX_PRIVACY_BUNDLE_RECORDS:
+            raise HTTPException(status_code=413, detail="The matching record limit was reached. Use individual record exports.")
+        leads.append(source_lead)
+        leads.sort(key=lambda lead: (lead.created_at, lead.lead_id), reverse=True)
+
+    records = []
+    current_size = 0
+    related_counts = {"followups": 0, "audit_events": 0, "whatsapp_messages": 0}
+    for lead in leads:
+        record = _collect_lead_record(lead, followups_repo, audit_repo, whatsapp_repo)
+        current_size += len(json.dumps(record, ensure_ascii=False).encode("utf-8"))
+        if current_size > MAX_PRIVACY_BUNDLE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="The matching data exceeds the export size limit. Use the paged record list and export individual records.",
+            )
+        related_counts["followups"] += len(record["followups"])
+        related_counts["audit_events"] += len(record["audit_events"])
+        related_counts["whatsapp_messages"] += len(record["whatsapp_messages"])
+        records.append(record)
+
+    exported_at = datetime.now(timezone.utc).isoformat()
+    export_event = audit_repo.build(AuditEventCreate(
+        lead_id=source_lead.lead_id,
+        action="privacy_subject_bundle_exported",
+        actor=f"user:{operator['sub']}",
+        details={
+            "privacy_request_id": privacy_request.request_id,
+            "identifier_type": identifier_type,
+            "matched_record_count": len(records),
+            "matched_lead_ids": [record["lead"]["lead_id"] for record in records],
+            **related_counts,
+        },
+    ))
+    payload = {
+        "schema_version": "1.1",
+        "exported_at": exported_at,
+        "tenant_id": settings.effective_tenant_id,
+        "records": records,
+        "export_context": {
+            "privacy_request_id": privacy_request.request_id,
+            "identifier_type": identifier_type,
+            "scope": f"all_indexed_local_records_matching_verified_{identifier_type}",
+            "complete_for_selected_identifier": False,
+            "complete_for_current_index_results": True,
+            "index_consistency": "eventually_consistent",
+            "complete_subject_export": False,
+            "limitations": [
+                "This bundle includes records matching one verified email or phone only.",
+                "Customer-history GSIs are eventually consistent; verify index backfills and wait for recent changes before treating this as complete.",
+                "It does not discover changed or alternate identifiers or records in Zoho, Meta, or other external systems.",
+                "Confirm the corresponding email and phone match lists and use the approved process for external systems before completing the request.",
+            ],
+        },
+    }
+    for record in records:
+        if record["lead"]["lead_id"] == source_lead.lead_id:
+            record["audit_events"].append(export_event.model_dump(mode="json"))
+            break
+    body = json.dumps(payload, ensure_ascii=False)
+    if len(body.encode("utf-8")) > MAX_PRIVACY_BUNDLE_BYTES:
+        raise HTTPException(status_code=413, detail="The export exceeds the response size limit. Use individual record exports.")
+    audit_repo.store(export_event)
+    safe_request_id = re.sub(r"[^A-Za-z0-9_-]", "_", privacy_request.request_id)[:48]
+    return _json_download(payload, f"access-{safe_request_id}-{identifier_type}-bundle.json")
 
 
 @router.get(
