@@ -12,7 +12,6 @@ from typing import Optional
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
-from boto3.dynamodb.types import TypeSerializer
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationError, field_validator
@@ -28,15 +27,15 @@ from app.repositories.customer_index import customer_index_keys
 from app.repositories.customer_suppressions import (
     history_index_marker_key,
     migration_marker_key,
-    suppression_items,
     suppression_keys,
 )
 from app.repositories.customer_index import require_customer_index_key
 from app.policy.guardrails import check_opt_out, detect_privacy_request
+from app.integrations.persistence import serialize_item as _serialize, suppression_transaction_items as _suppression_transaction_items
+from app.integrations.zoho import ZohoLeadUpdateWebhook, ZohoLeadWebhook, apply_lead_snapshot
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/integrations/v1", tags=["Integrations"])
-_serializer = TypeSerializer()
 _secret_value: Optional[str] = None
 _secret_expires_at = 0.0
 _zoho_secret_value: Optional[str] = None
@@ -47,24 +46,6 @@ _IDEMPOTENCY_TTL_SECONDS = 60 * 60 * 24 * 30
 
 
 class InboundLead(BaseModel):
-    customer_name: str = Field(min_length=1, max_length=200)
-    customer_email: Optional[EmailStr] = None
-    customer_phone: Optional[str] = Field(default=None, max_length=64)
-    source: SourceEnum
-    message: str = Field(min_length=1, max_length=20000)
-
-    model_config = ConfigDict(extra="forbid")
-
-    @field_validator("customer_name", "message", mode="before")
-    @classmethod
-    def trim_required_text(cls, value):
-        return value.strip() if isinstance(value, str) else value
-
-
-class ZohoLeadWebhook(BaseModel):
-    """Explicit field-mapped Zoho Leads create event; configure the CRM webhook to this shape."""
-
-    record_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
     customer_name: str = Field(min_length=1, max_length=200)
     customer_email: Optional[EmailStr] = None
     customer_phone: Optional[str] = Field(default=None, max_length=64)
@@ -103,7 +84,7 @@ def _get_webhook_secret() -> str:
         return value
     except HTTPException:
         raise
-    except Exception as exc:
+    except CustomerIndexKeyUnavailableError as exc:
         logger.exception("Unable to read inbound webhook secret")
         raise HTTPException(status_code=503, detail="Inbound webhook integration is unavailable") from exc
 
@@ -161,29 +142,6 @@ def _verify_signature(body: bytes, timestamp: str, provider: str, event_id: str,
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
 
-def _serialize(item: dict) -> dict:
-    return {key: _serializer.serialize(value) for key, value in item.items()}
-
-
-def _suppression_transaction_items(lead: Lead) -> list[dict]:
-    keys = suppression_keys(settings.effective_tenant_id, lead.customer_email, lead.customer_phone)
-    if lead.lifecycle_status == LifecycleStatusEnum.OPTED_OUT:
-        return [
-            {"Put": {"TableName": settings.customer_suppressions_table, "Item": _serialize(item)}}
-            for item in suppression_items(settings.effective_tenant_id, lead.lead_id, lead.customer_email, lead.customer_phone)
-        ]
-    return [
-        {
-            "ConditionCheck": {
-                "TableName": settings.customer_suppressions_table,
-                "Key": _serialize({"suppression_key": key}),
-                "ConditionExpression": "attribute_not_exists(suppression_key)",
-            }
-        }
-        for key in keys if key
-    ]
-
-
 async def _read_bounded_body(request: Request) -> bytes:
     content_length = request.headers.get("content-length")
     if content_length is not None:
@@ -216,6 +174,7 @@ def _create_or_return_duplicate(
     privacy_request: Optional[PrivacyRequest] = None,
     *,
     permanent_idempotency: bool = False,
+    source_modified_at: Optional[str] = None,
 ) -> JSONResponse:
     dynamodb = get_boto3_dynamodb_resource()
     if not dynamodb:
@@ -256,6 +215,8 @@ def _create_or_return_duplicate(
         "status": "COMPLETED",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if source_modified_at:
+        marker["source_modified_at"] = source_modified_at
     if not permanent_idempotency:
         marker["expires_at"] = int(time.time()) + _IDEMPOTENCY_TTL_SECONDS
     client = dynamodb.meta.client
@@ -315,6 +276,28 @@ def _create_or_return_duplicate(
                     raise HTTPException(status_code=409, detail="Idempotency key was already used for a different payload")
                 if existing.get("provider") != provider or not existing.get("lead_id"):
                     raise HTTPException(status_code=503, detail="Stored webhook idempotency state is invalid")
+                if provider == "zoho-crm" and source_modified_at and not existing.get("source_modified_at"):
+                    try:
+                        events_table.update_item(
+                            Key={"event_key": event_key},
+                            UpdateExpression="SET source_modified_at = :source_time",
+                            ConditionExpression=(
+                                "attribute_exists(event_key) AND tenant_id = :tenant AND provider = :provider "
+                                "AND payload_digest = :payload_digest AND attribute_not_exists(source_modified_at)"
+                            ),
+                            ExpressionAttributeValues={
+                                ":source_time": source_modified_at,
+                                ":tenant": settings.effective_tenant_id,
+                                ":provider": provider,
+                                ":payload_digest": payload_digest,
+                            },
+                        )
+                    except ClientError as migration_error:
+                        if migration_error.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                            raise HTTPException(status_code=503, detail="Could not backfill Zoho source version") from migration_error
+                        raise HTTPException(status_code=409, detail="Zoho record changed during source-version backfill; retry the latest snapshot") from migration_error
+                    except BotoCoreError as migration_error:
+                        raise HTTPException(status_code=503, detail="Could not backfill Zoho source version") from migration_error
                 return JSONResponse(
                     status_code=status.HTTP_200_OK,
                     content={"accepted": True, "duplicate": True, "lead_id": existing["lead_id"]},
@@ -469,4 +452,29 @@ async def ingest_zoho_lead(
         payload_digest,
         privacy_record,
         permanent_idempotency=True,
+        source_modified_at=payload.modified_at.isoformat() if payload.modified_at else None,
     )
+
+
+@router.post("/zoho/leads/updates", summary="Reconcile a versioned Zoho CRM lead snapshot")
+async def ingest_zoho_lead_update(
+    request: Request,
+    zoho_token: str = Header(default="", alias="X-LeadRescue-Token"),
+):
+    """Apply a complete, newer Zoho snapshot to its previously imported local record."""
+    body = await _read_bounded_body(request)
+    await run_in_threadpool(_verify_zoho_token, zoho_token)
+    try:
+        payload = ZohoLeadUpdateWebhook.model_validate_json(body)
+    except ValidationError as exc:
+        errors = [{"loc": item["loc"], "msg": item["msg"], "type": item["type"]} for item in exc.errors()]
+        raise HTTPException(status_code=422, detail=errors) from exc
+    snapshot = InboundLead(
+        customer_name=payload.customer_name,
+        customer_email=payload.customer_email,
+        customer_phone=payload.customer_phone,
+        source=payload.source,
+        message=payload.message,
+    )
+    payload_digest = hashlib.sha256(snapshot.model_dump_json().encode("utf-8")).hexdigest()
+    return await run_in_threadpool(apply_lead_snapshot, payload, payload_digest)
