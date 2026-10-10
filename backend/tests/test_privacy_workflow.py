@@ -1,6 +1,7 @@
 """Regression coverage for the customer privacy intake and hold workflow."""
 
 import pytest
+import json
 from fastapi.testclient import TestClient
 
 from app.api.deps import _audit_repo, _leads_repo, _privacy_requests_repo
@@ -114,6 +115,46 @@ def test_related_record_discovery_requires_verified_identity_and_paginates_witho
     assert discovery_event["details"]["match_count"] == 1
     assert discovery_event["details"]["matched_lead_ids"] == [first_page.json()[0]["lead_id"]]
     assert "customer_email" not in discovery_event["details"]
+
+
+def test_access_record_export_requires_verified_request_and_matching_contact():
+    first = create_lead("Previous inquiry", email="shared@example.com")
+    request_lead = create_lead("Send me my data", email="shared@example.com")
+    unrelated = create_lead("Unrelated inquiry", email="other@example.com")
+    request = client.get("/api/privacy/requests?status=open").json()[0]
+    endpoint = f"/api/privacy/requests/{request['request_id']}/records/{first['lead_id']}/export?match=email"
+
+    unverified = client.get(endpoint)
+    assert unverified.status_code == 409
+
+    for target in ("identity_verification_required", "verified"):
+        response = client.put(
+            f"/api/privacy/requests/{request['request_id']}/status",
+            json={"status": target},
+        )
+        assert response.status_code == 200
+
+    mismatched = client.get(
+        f"/api/privacy/requests/{request['request_id']}/records/{unrelated['lead_id']}/export?match=email"
+    )
+    assert mismatched.status_code == 404
+
+    exported = client.get(endpoint)
+    assert exported.status_code == 200
+    assert exported.headers["cache-control"] == "private, no-store"
+    payload = json.loads(exported.content)
+    assert payload["lead"]["lead_id"] == first["lead_id"]
+    assert payload["export_context"] == {
+        "privacy_request_id": request["request_id"],
+        "identifier_type": "email",
+        "scope": "one_lead_record_and_its_local_history",
+        "complete_subject_export": False,
+        "limitation": "This export covers one LeadRescue lead matched by the selected stored identifier. It does not include other identifiers or external systems.",
+    }
+    events = client.get(f"/api/leads/{first['lead_id']}/audit").json()
+    export_event = next(event for event in events if event["action"] == "privacy_subject_record_exported")
+    assert export_event["details"]["privacy_request_id"] == request["request_id"]
+    assert request_lead["lead_id"] != first["lead_id"]
 
 
 @pytest.mark.parametrize(

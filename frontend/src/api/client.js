@@ -79,6 +79,30 @@ export const api = {
         window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
     },
 
+    exportPrivacyRequestRecord: async (requestId, leadId, match) => {
+        const token = getAccessToken();
+        const query = new URLSearchParams({ match });
+        const response = await fetch(
+            `${API_BASE_URL}/privacy/requests/${encodeURIComponent(requestId)}/records/${encodeURIComponent(leadId)}/export?${query}`,
+            { headers: token ? { Authorization: `Bearer ${token}` } : {}, cache: 'no-store' },
+        );
+        if (!response.ok) {
+            if (response.status === 401) window.dispatchEvent(new Event('leadrescue-auth-expired'));
+            const error = new Error(`Request failed (${response.status})`);
+            error.status = response.status;
+            throw error;
+        }
+        const blob = await response.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        const download = document.createElement('a');
+        download.href = objectUrl;
+        download.download = `access-${requestId.slice(0, 12)}-${leadId.slice(0, 80).replace(/[^A-Za-z0-9_-]/g, '_')}-export.json`;
+        document.body.appendChild(download);
+        download.click();
+        download.remove();
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    },
+
     getPrivacyRequestsPage: (params = {}) => {
         const query = new URLSearchParams({ limit: '50' });
         if (params.cursor) query.set('cursor', params.cursor);

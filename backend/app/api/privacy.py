@@ -210,20 +210,46 @@ def export_lead_data(
     if not lead:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lead not found")
 
+    return _export_lead_record(
+        lead,
+        operator,
+        followups_repo,
+        audit_repo,
+        whatsapp_repo,
+        audit_action="lead_data_exported",
+        audit_details={},
+        filename_prefix="lead",
+    )
+
+
+def _export_lead_record(
+    lead,
+    operator,
+    followups_repo: FollowUpsRepository,
+    audit_repo: AuditRepository,
+    whatsapp_repo: WhatsAppMessagesRepository,
+    *,
+    audit_action: str,
+    audit_details: dict,
+    filename_prefix: str,
+    export_context: dict | None = None,
+):
+    """Build a no-store export for one lead and its complete local history."""
+
     followups = []
     cursor = None
     while True:
-        page, cursor = followups_repo.list_followups_page(limit=100, cursor=cursor, lead_id=lead_id)
+        page, cursor = followups_repo.list_followups_page(limit=100, cursor=cursor, lead_id=lead.lead_id)
         followups.extend(page)
         if cursor is None:
             break
 
-    whatsapp_messages = whatsapp_repo.all_for_lead(lead_id)
+    whatsapp_messages = whatsapp_repo.all_for_lead(lead.lead_id)
 
     events = []
     cursor = None
     while True:
-        page, cursor = audit_repo.list_by_lead_page(lead_id, limit=100, cursor=cursor)
+        page, cursor = audit_repo.list_by_lead_page(lead.lead_id, limit=100, cursor=cursor)
         events.extend(page)
         if cursor is None:
             break
@@ -231,10 +257,15 @@ def export_lead_data(
     exported_at = datetime.now(timezone.utc).isoformat()
     export_event = audit_repo.create(
         AuditEventCreate(
-            lead_id=lead_id,
-            action="lead_data_exported",
+            lead_id=lead.lead_id,
+            action=audit_action,
             actor=f"user:{operator['sub']}",
-            details={"followup_count": len(followups), "audit_event_count": len(events), "whatsapp_message_count": len(whatsapp_messages)},
+            details={
+                **audit_details,
+                "followup_count": len(followups),
+                "audit_event_count": len(events),
+                "whatsapp_message_count": len(whatsapp_messages),
+            },
         )
     )
     payload = {
@@ -246,14 +277,75 @@ def export_lead_data(
         "audit_events": [item.model_dump(mode="json") for item in [*events, export_event]],
         "whatsapp_messages": [item.model_dump(mode="json") for item in whatsapp_messages],
     }
-    safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", lead_id)[:80] or "record"
+    if export_context:
+        payload["export_context"] = export_context
+    safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", lead.lead_id)[:80] or "record"
     return Response(
         content=json.dumps(payload, ensure_ascii=False),
         media_type="application/json",
         headers={
-            "Content-Disposition": f'attachment; filename="lead-{safe_id}-export.json"',
+            "Content-Disposition": f'attachment; filename="{filename_prefix}-{safe_id}-export.json"',
             "Cache-Control": "private, no-store",
             "Pragma": "no-cache",
             "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get(
+    "/requests/{request_id}/records/{lead_id}/export",
+    summary="Export one lead matched to a verified access request",
+)
+def export_privacy_request_record(
+    request_id: str,
+    lead_id: str,
+    identifier_type: Literal["email", "phone"] = Query(..., alias="match"),
+    operator=Depends(require_roles(settings.admin_role)),
+    privacy_repo: PrivacyRequestsRepository = Depends(get_privacy_requests_repo),
+    leads_repo: LeadsRepository = Depends(get_leads_repo),
+    followups_repo: FollowUpsRepository = Depends(get_followups_repo),
+    audit_repo: AuditRepository = Depends(get_audit_repo),
+    whatsapp_repo: WhatsAppMessagesRepository = Depends(get_whatsapp_messages_repo),
+):
+    """Export a single matching record only after access-request identity verification."""
+    privacy_request = privacy_repo.get_by_id(request_id)
+    if not privacy_request:
+        raise HTTPException(status_code=404, detail="Privacy request not found")
+    if privacy_request.request_type.value != "access":
+        raise HTTPException(status_code=409, detail="Record exports are only available for access requests")
+    if privacy_request.status not in {PrivacyRequestStatus.VERIFIED, PrivacyRequestStatus.IN_PROGRESS}:
+        raise HTTPException(status_code=409, detail="Verify the request identity before exporting records")
+
+    source_lead = leads_repo.get_by_id(privacy_request.lead_id)
+    lead = leads_repo.get_by_id(lead_id)
+    if not source_lead or not lead:
+        raise HTTPException(status_code=404, detail="Matching lead record not found")
+    if identifier_type == "email":
+        source_identifier = (source_lead.customer_email or "").strip().casefold()
+        candidate_identifier = (lead.customer_email or "").strip().casefold()
+    else:
+        source_identifier = re.sub(r"\D", "", source_lead.customer_phone or "")
+        candidate_identifier = re.sub(r"\D", "", lead.customer_phone or "")
+    if not source_identifier or source_identifier != candidate_identifier:
+        raise HTTPException(status_code=404, detail="Matching lead record not found")
+
+    return _export_lead_record(
+        lead,
+        operator,
+        followups_repo,
+        audit_repo,
+        whatsapp_repo,
+        audit_action="privacy_subject_record_exported",
+        audit_details={
+            "privacy_request_id": privacy_request.request_id,
+            "identifier_type": identifier_type,
+        },
+        filename_prefix=f"access-{request_id[:12]}",
+        export_context={
+            "privacy_request_id": privacy_request.request_id,
+            "identifier_type": identifier_type,
+            "scope": "one_lead_record_and_its_local_history",
+            "complete_subject_export": False,
+            "limitation": "This export covers one LeadRescue lead matched by the selected stored identifier. It does not include other identifiers or external systems.",
         },
     )
