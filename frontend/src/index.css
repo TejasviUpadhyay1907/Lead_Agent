@@ -732,6 +732,14 @@ textarea {
 
 /* Settings, forms, policy, and modal primitives */
 .settings-layout { display: grid; grid-template-columns: minmax(0,1.4fr) minmax(280px,1fr); gap: 1rem; align-items: start; }
+.integration-connection { display: grid; gap: .8rem; }
+.integration-status { display: flex; align-items: flex-start; gap: .65rem; padding: .75rem; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--bg-dark-0); }
+.integration-status strong { color: var(--text-main); font-size: .78rem; }
+.integration-status p { margin-top: .2rem; color: var(--text-muted); font-size: .72rem; }
+.status-dot { width: .55rem; height: .55rem; margin-top: .22rem; flex: 0 0 auto; border-radius: 50%; background: var(--text-dim); }
+.status-dot.active { background: var(--color-success); box-shadow: 0 0 0 3px var(--bg-success); }
+.integration-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.integration-actions a { text-decoration: none; }
 .settings-form,.form-grid,.modal-form { display: grid; gap: 1rem; }
 .form-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
 .field-hint,.form-note,.field-optional { color: var(--text-muted); font-size: .7rem; }

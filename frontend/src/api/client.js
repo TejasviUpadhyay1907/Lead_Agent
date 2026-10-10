@@ -195,6 +195,8 @@ export const api = {
         body: JSON.stringify({ send_confirmed: true, template_fingerprint: templateFingerprint }),
     }),
     getWhatsAppConfiguration: () => request('/whatsapp/configuration'),
+    getZohoConnectionStatus: () => request('/integrations/zoho/status'),
+    startZohoAuthorization: () => request('/integrations/zoho/authorize', { method: 'POST' }),
 
     rescueLead: (id) => request(`/leads/${id}/rescue`, {
         method: 'POST',
