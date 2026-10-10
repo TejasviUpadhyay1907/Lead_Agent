@@ -197,6 +197,7 @@ export const api = {
     getWhatsAppConfiguration: () => request('/whatsapp/configuration'),
     getZohoConnectionStatus: () => request('/integrations/zoho/status'),
     startZohoAuthorization: () => request('/integrations/zoho/authorize', { method: 'POST' }),
+    disconnectZoho: () => request('/integrations/zoho/disconnect', { method: 'POST' }),
 
     rescueLead: (id) => request(`/leads/${id}/rescue`, {
         method: 'POST',

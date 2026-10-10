@@ -126,6 +126,10 @@ def load_oauth_config() -> dict:
             raise HTTPException(status_code=503, detail="Zoho outcome field mapping contains invalid or duplicate field names")
     if "outcome_writeback_enabled" in config and not isinstance(config["outcome_writeback_enabled"], bool):
         raise HTTPException(status_code=503, detail="Zoho outcome writeback setting is malformed")
+    if "pending_revocation_token" in config and (
+        not isinstance(config["pending_revocation_token"], str) or not config["pending_revocation_token"]
+    ):
+        raise HTTPException(status_code=503, detail="Zoho pending revocation state is malformed")
     return config
 
 
@@ -150,6 +154,8 @@ def create_authorization_url(initiated_by: str) -> tuple[str, str]:
     if not isinstance(initiated_by, str) or not initiated_by or len(initiated_by) > 256:
         raise HTTPException(status_code=403, detail="A valid administrator identity is required")
     config = load_oauth_config()
+    if config.get("pending_revocation_token"):
+        raise HTTPException(status_code=409, detail="Retry Zoho disconnection before connecting another organization")
     state = secrets.token_urlsafe(32)
     authorization_url = f"{config['accounts_url']}/oauth/v2/auth?{urlencode({
         'scope': ZOHO_LEAD_UPDATE_SCOPE,
@@ -271,6 +277,33 @@ def _token_request(accounts_url: str, parameters: dict) -> dict:
     return result
 
 
+def revoke_refresh_token(config: dict, refresh_token: str) -> None:
+    """Revoke a Zoho grant using its data-center-specific Accounts endpoint."""
+    if config.get("accounts_url") not in ZOHO_ACCOUNTS_URLS or not refresh_token:
+        raise ZohoOAuthError("Zoho revocation configuration is invalid")
+    request = Request(
+        f"{config['accounts_url']}/oauth/v2/token/revoke?{urlencode({'token': refresh_token})}",
+        data=b"",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with _urlopen_no_redirect(request, timeout=8) as response:
+            body = response.read(16 * 1024)
+    except HTTPError as exc:
+        exc.close()
+        raise ZohoOAuthError("Zoho did not confirm token revocation") from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        raise ZohoOAuthError("Zoho token revocation could not be confirmed") from exc
+    if body:
+        try:
+            result = json.loads(body)
+        except ValueError as exc:
+            raise ZohoOAuthError("Zoho returned an invalid revocation response") from exc
+        if not isinstance(result, dict) or result.get("error"):
+            raise ZohoOAuthError("Zoho did not confirm token revocation")
+
+
 def exchange_authorization_code(config: dict, code: str) -> dict:
     return _token_request(config["accounts_url"], {
         "code": code,
@@ -310,14 +343,38 @@ def refresh_access_token(config: dict | None = None) -> tuple[str, str]:
 
 def connection_status() -> dict:
     config = load_oauth_config()
+    connected = bool(config.get("refresh_token"))
+    pending_revocation = bool(config.get("pending_revocation_token"))
     return {
-        "connection_status": "configured" if config.get("refresh_token") else "not_connected",
+        "connection_status": "configured" if connected else "revocation_pending" if pending_revocation else "not_connected",
         "connected_at": config.get("connected_at"),
         "accounts_region": urlsplit(config["accounts_url"]).hostname,
         "api_region": urlsplit(config["api_domain"]).hostname if config.get("api_domain") else None,
         "scope": ZOHO_LEAD_UPDATE_SCOPE,
-        "outcome_writeback_enabled": bool(config.get("outcome_writeback_enabled") and config.get("outcome_field_mapping")),
+        "outcome_writeback_enabled": bool(connected and config.get("outcome_writeback_enabled") and config.get("outcome_field_mapping")),
     }
+
+
+def disconnect_zoho() -> dict:
+    """Disable local CRM access first and retain a retryable token until revocation is confirmed."""
+    config = load_oauth_config()
+    token = config.get("pending_revocation_token") or config.get("refresh_token")
+    if not token:
+        return {"connection_status": "not_connected", "provider_revocation": "not_required"}
+    config["pending_revocation_token"] = token
+    config.pop("refresh_token", None)
+    config.pop("connected_at", None)
+    config.pop("api_domain", None)
+    config["outcome_writeback_enabled"] = False
+    save_oauth_config(config)
+    try:
+        revoke_refresh_token(config, token)
+    except ZohoOAuthError as exc:
+        logger.warning("Zoho revocation pending after local disconnect (%s)", type(exc).__name__)
+        return {"connection_status": "revocation_pending", "provider_revocation": "pending"}
+    config.pop("pending_revocation_token", None)
+    save_oauth_config(config)
+    return {"connection_status": "not_connected", "provider_revocation": "confirmed"}
 
 
 def connect_with_authorization_code(state: str, code: str) -> None:

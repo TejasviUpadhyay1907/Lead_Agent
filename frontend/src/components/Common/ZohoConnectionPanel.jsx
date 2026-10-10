@@ -67,6 +67,26 @@ export function ZohoConnectionPanel({ demoMode = false }) {
         }
     };
 
+    const disconnect = async () => {
+        if (status?.connection_status === 'configured'
+            && !window.confirm('Disconnect Zoho CRM? LeadRescue will stop using this connection and ask Zoho to revoke its authorization.')) return;
+        setBusy(true);
+        setError('');
+        setNotice('');
+        setAuthorizationUrl('');
+        try {
+            const result = await api.disconnectZoho();
+            await loadStatus();
+            setNotice(result?.provider_revocation === 'pending'
+                ? 'Zoho access is disabled in LeadRescue. Zoho has not confirmed revocation yet; retry this action to complete revocation.'
+                : 'Zoho is disconnected and its authorization has been revoked.');
+        } catch (reason) {
+            setError(safeError(reason, 'Zoho disconnection could not be completed.'));
+        } finally {
+            setBusy(false);
+        }
+    };
+
     return (
         <section className="panel">
             <SectionHeader
@@ -84,11 +104,19 @@ export function ZohoConnectionPanel({ demoMode = false }) {
                         <div className="integration-status" role="status">
                             <span className={`status-dot ${status.connection_status === 'configured' ? 'active' : ''}`} aria-hidden="true" />
                             <div>
-                                <strong>{status.connection_status === 'configured' ? 'Authorization saved' : 'Not connected'}</strong>
+                                <strong>
+                                    {status.connection_status === 'configured'
+                                        ? 'Authorization saved'
+                                        : status.connection_status === 'revocation_pending'
+                                            ? 'Disconnected · revocation pending'
+                                            : 'Not connected'}
+                                </strong>
                                 <p>
                                     {status.connection_status === 'configured'
                                         ? `Zoho ${status.accounts_region || ''}${status.api_region ? ` · API ${status.api_region}` : ''}. Token validity is not checked here. ${status.outcome_writeback_enabled ? 'Outcome writeback is enabled.' : 'Outcome writeback remains off until an administrator configures and enables the CRM field mapping.'}`
-                                        : 'Ask the deployment administrator to configure the Zoho OAuth secret before connecting.'}
+                                        : status.connection_status === 'revocation_pending'
+                                            ? 'Local CRM access is disabled. Retry disconnection to ask Zoho to revoke the saved token.'
+                                            : 'Ask the deployment administrator to configure the Zoho OAuth secret before connecting.'}
                                 </p>
                             </div>
                         </div>
@@ -101,16 +129,26 @@ export function ZohoConnectionPanel({ demoMode = false }) {
                         <button type="button" className="btn-secondary" onClick={loadStatus} disabled={loading || busy}>
                             <RefreshCw size={15} aria-hidden="true" /> Refresh status
                         </button>
-                        <button type="button" className="btn-primary" onClick={prepareAuthorization} disabled={busy || loading || !status}>
+                        <button
+                            type="button"
+                            className="btn-primary"
+                            onClick={prepareAuthorization}
+                            disabled={busy || loading || !status || status.connection_status === 'revocation_pending'}
+                        >
                             {busy ? <BusyLabel>Preparing…</BusyLabel> : 'Connect or reconnect Zoho'}
                         </button>
+                        {(status?.connection_status === 'configured' || status?.connection_status === 'revocation_pending') && (
+                            <button type="button" className="btn-secondary" onClick={disconnect} disabled={busy || loading}>
+                                {busy ? <BusyLabel>Disconnecting…</BusyLabel> : status.connection_status === 'revocation_pending' ? 'Retry revocation' : 'Disconnect Zoho'}
+                            </button>
+                        )}
                         {authorizationUrl && (
                             <a className="btn-secondary" href={authorizationUrl} target="_blank" rel="noopener noreferrer">
                                 Continue to Zoho <ExternalLink size={15} aria-hidden="true" />
                             </a>
                         )}
                     </div>
-                    <p className="field-hint">The OAuth grant requests update access to the Leads module. CRM outcome writeback is not enabled by this connection screen yet.</p>
+                    <p className="field-hint">The OAuth grant requests read and update access to the Leads module. Outcome writeback also requires an administrator-configured custom field mapping in the deployment secret.</p>
                 </div>
             )}
         </section>
