@@ -84,8 +84,8 @@ def _get_webhook_secret() -> str:
         return value
     except HTTPException:
         raise
-    except CustomerIndexKeyUnavailableError as exc:
-        logger.exception("Unable to read inbound webhook secret")
+    except Exception as exc:
+        logger.error("Unable to read inbound webhook secret (%s)", type(exc).__name__)
         raise HTTPException(status_code=503, detail="Inbound webhook integration is unavailable") from exc
 
 
@@ -114,7 +114,7 @@ def _get_zoho_webhook_secret() -> str:
     except HTTPException:
         raise
     except Exception as exc:
-        logger.exception("Unable to read Zoho webhook secret")
+        logger.error("Unable to read Zoho webhook secret (%s)", type(exc).__name__)
         raise HTTPException(status_code=503, detail="Zoho CRM webhook integration is unavailable") from exc
 
 
