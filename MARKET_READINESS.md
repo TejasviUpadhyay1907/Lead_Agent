@@ -2,7 +2,7 @@
 
 ## Current continuation checkpoint (2026-10-11)
 
-The latest merged code change on `main` is `7092a45` (PR #17), adding bounded privacy access bundles for one verified email or phone. PR #17 passed **221 backend tests**, frontend production build, SAM lint validation, `git diff --check`, CodeQL, and dependency analysis. OAuth, field discovery, writeback, revocation, and privacy bundles remain unverified against deployed/vendor systems; Zoho/Meta sandbox behavior and AWS staging remain unverified. AWS CLI credentials were checked on 2026-10-11 and the session had expired. Zoho CRM + Meta WhatsApp Cloud API remains the selected India SMB pilot assumption, pending a design partner's confirmation. Readiness remains pre-staging/pre-pilot.
+The latest merged code change on `main` is `55d9605` (PR #18), which makes privacy access bundle collection page through related WhatsApp, follow-up, and audit records and stop as the byte budget is reached. PR #18 passed the backend/SAM and frontend CI checks, CodeQL, and both dependency analyses; Python syntax compilation and `git diff --check` also passed locally. PR #17 added the bounded export endpoint and passed **221 backend tests**. OAuth, field discovery, writeback, revocation, and privacy bundles remain unverified against deployed/vendor systems; Zoho/Meta sandbox behavior and AWS staging remain unverified. AWS CLI credentials were checked on 2026-10-11 and the session had expired. Zoho CRM + Meta WhatsApp Cloud API remains the selected India SMB pilot assumption, pending a design partner's confirmation. Readiness remains pre-staging/pre-pilot.
 
 ## Assessment
 
