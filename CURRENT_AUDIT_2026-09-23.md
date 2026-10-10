@@ -7,7 +7,8 @@
 ### Continuation update — 2026-10-10: verified access-request record downloads
 
 - Added an admin-only download action inside verified access requests. It exports one identifier-matched lead with that lead's full local follow-up, audit, and WhatsApp history. The backend requires an access request in verified/in-progress status, rechecks that the chosen lead still matches the request's current stored email/phone, marks the response private/no-store, and records a request-linked audit event. The UI distinguishes each individual record export and warns admins to repeat for all email/phone matches and handle external systems through the approved process.
-- This is a controlled per-record fulfillment aid, not a complete subject-wide archive or deletion workflow. It cannot find changed identifiers or records in Zoho/Meta, and no AWS staging proof exists. Local verification passes (180 backend tests and frontend production build); the feature branch still needs the required PR checks before merge.
+- This is a controlled per-record fulfillment aid, not a complete subject-wide archive or deletion workflow. It cannot find changed identifiers or records in Zoho/Meta, and no AWS staging proof exists. Local verification passed (180 backend tests and frontend production build); PR #2 merged to `main` as `3b9fbf7`, with frontend, backend/SAM, and CodeQL checks passing.
+- CI exposed new high-severity findings in `source-map-js` and PyJWT. The frontend lock now pins `source-map-js` 1.2.2 and the hashed backend lock pins PyJWT 2.15.0; dependency audits and all required checks passed for the merge. Choose Zoho CRM + Meta WhatsApp as the default first-pilot candidate for planning, based on the India SMB assumption; a design partner's actual stack, sandbox behavior, and consent records still need confirmation.
 
 ### Continuation update — 2026-09-24: protect WhatsApp provider identity binding
 
@@ -20,6 +21,12 @@
 - Focused WhatsApp suite passes **6 tests**; the full backend suite passes **179 tests** (two upstream/cache warnings). These are local simulated-repository tests; the DynamoDB race condition expression and Meta callback ordering have not been exercised against AWS/Meta.
 
 ## Executive assessment
+
+### Latest verified state — 2026-10-10
+
+- `main` is at `3b9fbf766b4ba7254b9bc08ffb8948d5d2445431` and synced with `origin/main`. GitHub Quality Gates [38068309420](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/38068309420) and CodeQL [38068309428](https://github.com/TejasviUpadhyay1907/Lead_Agent/actions/runs/38068309428) passed. Local backend suite: **180 passed**; frontend production build passed; `npm audit` reports no vulnerabilities.
+- Pilot candidate selected for planning: Zoho CRM + Meta WhatsApp Business Platform for an India-based SMB. Zoho currently provides create-only webhook intake; OAuth, edit reconciliation, and CRM writeback are not implemented. Meta send/callback code has not been exercised against a vendor sandbox. AWS staging remains unverified; the local AWS CLI session expired.
+- Stage: hardened prototype, pre-staging and pre-pilot. Do not claim industrial release readiness, completed company-data integrations, or top-market status.
 
 LeadRescue AI is a technically substantial, pre-pilot prototype for rescuing inbound sales leads. It is designed to receive and triage leads, calculate deterministic priority and risk, generate a response draft, and let a human decide what happens. Its strongest architectural decision is: **AI understands; deterministic software decides; humans approve.**
 
