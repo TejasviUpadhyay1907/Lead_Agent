@@ -10,6 +10,7 @@ from starlette.responses import JSONResponse
 from app.api.router import api_router
 from app.api.webhooks import router as webhooks_router
 from app.api.whatsapp_webhooks import router as whatsapp_webhooks_router
+from app.api.zoho_oauth import public_router as zoho_oauth_router
 from app.api.deps import get_leads_repo
 from app.config.settings import settings
 from app.repositories.leads import (
@@ -66,6 +67,7 @@ app.add_middleware(
 app.include_router(api_router)
 app.include_router(webhooks_router)
 app.include_router(whatsapp_webhooks_router)
+app.include_router(zoho_oauth_router)
 
 
 @app.get("/health")

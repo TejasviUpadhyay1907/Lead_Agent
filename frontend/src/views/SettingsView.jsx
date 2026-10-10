@@ -3,6 +3,7 @@ import { Settings, Save, Server, ListChecks, Info } from 'lucide-react';
 import { api } from '../api/client';
 import { PageHeader, SectionHeader, ErrorState, Notice, Skeleton, BusyLabel } from '../components/Common/UI';
 import { dateTime, humanize, safeError } from '../api/presentation';
+import { ZohoConnectionPanel } from '../components/Common/ZohoConnectionPanel';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
 
@@ -25,7 +26,7 @@ function formatConfigValue(value) {
     return String(value);
 }
 
-export function SettingsView({ onRefreshData, clock, demoMode = false }) {
+export function SettingsView({ onRefreshData, clock, demoMode = false, adminAccess = false }) {
     const [config, setConfig] = useState(null);
     const [locationsText, setLocationsText] = useState('');
     const [loading, setLoading] = useState(true);
@@ -183,6 +184,8 @@ export function SettingsView({ onRefreshData, clock, demoMode = false }) {
 
             {notice && <Notice tone="success">{notice}</Notice>}
             {actionError && <Notice tone="error">{actionError}</Notice>}
+
+            {adminAccess && <ZohoConnectionPanel demoMode={demoMode} />}
 
             <section className="panel">
                 <SectionHeader

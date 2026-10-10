@@ -111,7 +111,7 @@ export default function App() {
             {route.view === 'detail' && <LeadDetailView key={route.leadId} leadId={route.leadId} onBack={() => navigate('inbox')} onRefreshLeads={refreshData} revision={revision} config={data.config} clock={data.clock} followups={data.followups} followupsError={errors.followups} />}
             {route.view === 'followups' && <FollowupsView leads={data.leads} followups={data.followups} now={data.clock?.effective_now} onSelectLead={selectLead} onRefreshLeads={refreshData} error={errors.followups ? 'The follow-up API is unavailable. Retry to load the schedule.' : null} onRetry={refreshData} hasMore={Boolean(followupCursor)} loadingMore={loadingMore} onLoadMore={() => loadMore('followups')} loadMoreError={loadMoreError} />}
             {route.view === 'activity' && <ActivityView leads={data.leads} revision={revision} onSelectLead={selectLead} />}
-            {route.view === 'settings' && <SettingsView onRefreshData={refreshData} clock={data.clock} demoMode={demoMode} />}
+            {route.view === 'settings' && <SettingsView onRefreshData={refreshData} clock={data.clock} demoMode={demoMode} adminAccess={adminAccess} />}
             {route.view === 'privacy' && <PrivacyRequestsView onSelectLead={selectLead} />}
         </>}
         <footer className="page-footer"><span>LeadRescue AI <span className="footer-divider">/</span> Lead intelligence, human control.</span><span>{demoMode ? 'Synthetic workspace · External messaging is disabled' : 'Company workspace · Messaging requires tenant enablement'}</span></footer>
