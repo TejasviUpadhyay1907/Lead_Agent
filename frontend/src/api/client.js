@@ -198,6 +198,11 @@ export const api = {
     getZohoConnectionStatus: () => request('/integrations/zoho/status'),
     startZohoAuthorization: () => request('/integrations/zoho/authorize', { method: 'POST' }),
     disconnectZoho: () => request('/integrations/zoho/disconnect', { method: 'POST' }),
+    getZohoOutcomeFields: () => request('/integrations/zoho/fields'),
+    updateZohoOutcomeMapping: update => request('/integrations/zoho/outcome-mapping', {
+        method: 'PUT',
+        body: JSON.stringify(update),
+    }),
 
     rescueLead: (id) => request(`/leads/${id}/rescue`, {
         method: 'POST',

@@ -42,7 +42,8 @@ ZOHO_API_DOMAINS = frozenset({
     "https://www.zohoapis.com.sg",
     "https://www.zohoapis.com.mx",
 })
-ZOHO_LEAD_UPDATE_SCOPE = "ZohoCRM.modules.leads.READ,ZohoCRM.modules.leads.UPDATE"
+ZOHO_FIELD_METADATA_SCOPE = "ZohoCRM.settings.fields.READ"
+ZOHO_LEAD_UPDATE_SCOPE = f"ZohoCRM.modules.leads.READ,ZohoCRM.modules.leads.UPDATE,{ZOHO_FIELD_METADATA_SCOPE}"
 ZOHO_OUTCOME_RESERVED_FIELDS = frozenset({
     "id", "created_time", "modified_time", "email", "phone", "first_name", "last_name",
     "company", "lead_source", "lead_status", "owner", "is_converted", "converted_date",
@@ -130,6 +131,11 @@ def load_oauth_config() -> dict:
         not isinstance(config["pending_revocation_token"], str) or not config["pending_revocation_token"]
     ):
         raise HTTPException(status_code=503, detail="Zoho pending revocation state is malformed")
+    if "requested_scopes" in config and (
+        not isinstance(config["requested_scopes"], list)
+        or any(not isinstance(scope, str) for scope in config["requested_scopes"])
+    ):
+        raise HTTPException(status_code=503, detail="Zoho authorization scope state is malformed")
     return config
 
 
@@ -341,8 +347,9 @@ def refresh_access_token(config: dict | None = None) -> tuple[str, str]:
     return _access_token, _access_token_api_domain
 
 
-def connection_status() -> dict:
-    config = load_oauth_config()
+def connection_status(config: dict | None = None) -> dict:
+    if config is None:
+        config = load_oauth_config()
     connected = bool(config.get("refresh_token"))
     pending_revocation = bool(config.get("pending_revocation_token"))
     return {
@@ -352,7 +359,119 @@ def connection_status() -> dict:
         "api_region": urlsplit(config["api_domain"]).hostname if config.get("api_domain") else None,
         "scope": ZOHO_LEAD_UPDATE_SCOPE,
         "outcome_writeback_enabled": bool(connected and config.get("outcome_writeback_enabled") and config.get("outcome_field_mapping")),
+        "outcome_field_mapping": config.get("outcome_field_mapping") if isinstance(config.get("outcome_field_mapping"), dict) else {},
+        "field_metadata_scope_requested": ZOHO_FIELD_METADATA_SCOPE in config.get("requested_scopes", []),
     }
+
+
+def list_writable_lead_fields(config: dict | None = None) -> list[dict]:
+    """Return safe, writable custom Leads fields with supported mapping roles."""
+    config = config or load_oauth_config()
+    if not config.get("refresh_token"):
+        raise HTTPException(status_code=409, detail="Connect Zoho CRM before configuring outcome fields")
+    if ZOHO_FIELD_METADATA_SCOPE not in config.get("requested_scopes", []):
+        raise HTTPException(status_code=409, detail="Reconnect Zoho to grant read-only access to Leads field metadata")
+    access_token, api_domain = refresh_access_token(config)
+    request = Request(
+        f"{api_domain}/crm/v8/settings/fields?{urlencode({'module': 'Leads', 'type': 'all'})}",
+        headers={"Authorization": f"Zoho-oauthtoken {access_token}", "Accept": "application/json"},
+        method="GET",
+    )
+    try:
+        with _urlopen_no_redirect(request, timeout=8) as response:
+            payload = json.loads(response.read(1024 * 1024))
+    except HTTPError as exc:
+        code = exc.code
+        exc.close()
+        if code in {401, 403}:
+            raise HTTPException(status_code=409, detail="Zoho denied field metadata access; reconnect and check the CRM user's field permissions") from exc
+        raise HTTPException(status_code=503, detail="Zoho field metadata is temporarily unavailable") from exc
+    except (URLError, TimeoutError, OSError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail="Zoho field metadata is temporarily unavailable") from exc
+    records = payload.get("fields") if isinstance(payload, dict) else None
+    if not isinstance(records, list):
+        raise HTTPException(status_code=503, detail="Zoho returned invalid field metadata")
+
+    allowed_types = {
+        "outcome": {"text", "textarea", "picklist"},
+        "sales_value": {"currency", "integer", "bigint", "decimal", "double"},
+        "sales_currency": {"text"},
+        "reason": {"text", "textarea"},
+        "recorded_at": {"datetime"},
+    }
+    result = []
+    for field in records:
+        if not isinstance(field, dict):
+            continue
+        api_name = field.get("api_name")
+        data_type = field.get("data_type")
+        operations = field.get("operation_type")
+        private = field.get("private")
+        if (
+            not isinstance(api_name, str)
+            or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,99}", api_name)
+            or api_name.casefold() in ZOHO_OUTCOME_RESERVED_FIELDS
+            or field.get("custom_field") is not True
+            or not isinstance(operations, dict)
+            or operations.get("api_update") is not True
+            or field.get("read_only") is True
+            or field.get("field_read_only") is True
+            or field.get("system_mandatory") is True
+            or (isinstance(private, dict) and private.get("restricted") is True)
+            or not isinstance(data_type, str)
+        ):
+            continue
+        roles = [role for role, types in allowed_types.items() if data_type.casefold() in types]
+        pick_values = field.get("pick_list_values")
+        actual_values = {
+            value
+            for item in pick_values if isinstance(item, dict)
+            for value in [item.get("actual_value", item.get("display_value"))]
+            if isinstance(value, str) and item.get("type") != "unused"
+        } if isinstance(pick_values, list) else set()
+        if "outcome" in roles and data_type.casefold() == "picklist" and not {"won", "lost", "disqualified"}.issubset(actual_values):
+            roles.remove("outcome")
+        if not roles:
+            continue
+        result.append({
+            "api_name": api_name,
+            "label": field.get("field_label") or field.get("display_label") or api_name,
+            "data_type": data_type,
+            "eligible_for": roles,
+            "pick_list_values": sorted(value for value in actual_values if isinstance(value, str)) if "outcome" in roles and isinstance(pick_values, list) else [],
+        })
+    return result
+
+
+def update_outcome_field_mapping(enabled: bool, field_mapping: dict | None = None) -> dict:
+    config = load_oauth_config()
+    if not config.get("refresh_token"):
+        raise HTTPException(status_code=409, detail="Connect Zoho CRM before configuring outcome writeback")
+    if not enabled:
+        config["outcome_writeback_enabled"] = False
+        save_oauth_config(config)
+        return connection_status(config)
+    mapping = field_mapping if field_mapping is not None else config.get("outcome_field_mapping")
+    allowed_keys = {"outcome", "sales_value", "sales_currency", "reason", "recorded_at"}
+    if (
+        not isinstance(mapping, dict)
+        or not isinstance(mapping.get("outcome"), str)
+        or set(mapping) - allowed_keys
+        or any(not isinstance(value, str) for value in mapping.values())
+        or len({value.casefold() for value in mapping.values()}) != len(mapping)
+    ):
+        raise HTTPException(status_code=422, detail="Choose one distinct Zoho field for each configured outcome value")
+    fields = {field["api_name"]: field for field in list_writable_lead_fields(config)}
+    invalid = [
+        role for role, api_name in mapping.items()
+        if api_name not in fields or role not in fields[api_name]["eligible_for"]
+    ]
+    if invalid:
+        raise HTTPException(status_code=422, detail="One or more selected Zoho fields are not writable or have an incompatible type")
+    config["outcome_field_mapping"] = mapping
+    config["outcome_writeback_enabled"] = True
+    save_oauth_config(config)
+    return connection_status(config)
 
 
 def disconnect_zoho() -> dict:
@@ -396,6 +515,7 @@ def connect_with_authorization_code(state: str, code: str) -> None:
         config["refresh_token"] = refresh_token
         config["api_domain"] = api_domain
         config["connected_at"] = datetime.now(timezone.utc).isoformat()
+        config["requested_scopes"] = ZOHO_LEAD_UPDATE_SCOPE.split(",")
         save_oauth_config(config)
     except Exception:
         _finish_oauth_state(state, "OAUTH_FAILED")
