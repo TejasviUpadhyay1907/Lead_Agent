@@ -30,7 +30,7 @@
 
 ### Latest verified state — 2026-10-10
 
-- Published `main` is `e37b641` (PR #5), with the Zoho versioned-snapshot code merged in `280aeb6` (PR #4). Main and PR Quality Gates/CodeQL passed. The code baseline was locally verified with **185 backend tests**, frontend production build, Python compile, SAM validation, and npm dependency audit (`0` vulnerabilities). A local, uncommitted change now maps generic inbound-webhook Secrets Manager/configuration failures to a controlled HTTP 503; it still needs focused verification and normal PR review before release.
+- Published `main` is `8e0e5ea` (PR #6), after Zoho snapshot reconciliation in `280aeb6` (PR #4) and its audit refresh in `e37b641` (PR #5). All required PR checks passed, including backend/SAM, frontend production build, JavaScript/TypeScript and Python CodeQL analyses, and CodeQL status. The code baseline was locally verified with **185 backend tests**, frontend production build, Python compile, SAM validation, and npm dependency audit (`0` vulnerabilities); PR #6 additionally passed the backend/SAM and frontend/CodeQL gates. Webhook secret-load failures now return a controlled HTTP 503 and log only the exception class.
 - Pilot candidate selected for planning: Zoho CRM + Meta WhatsApp Business Platform for an India-based SMB. Zoho now has create intake plus versioned complete-snapshot edit reconciliation; OAuth connection lifecycle and CRM writeback are not implemented. Meta send/callback code has not been exercised against a vendor sandbox. AWS staging remains unverified; the local AWS CLI session expired.
 - Stage: hardened prototype, pre-staging and pre-pilot. Do not claim industrial release readiness, completed company-data integrations, or top-market status.
 
