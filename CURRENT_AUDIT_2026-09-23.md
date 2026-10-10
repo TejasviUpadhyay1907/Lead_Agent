@@ -34,6 +34,11 @@
 - Pilot candidate selected for planning: Zoho CRM + Meta WhatsApp Business Platform for an India-based SMB. Zoho now has create intake plus versioned complete-snapshot edit reconciliation; OAuth connection lifecycle and CRM writeback are not implemented. Meta send/callback code has not been exercised against a vendor sandbox. AWS staging remains unverified; the local AWS CLI session expired.
 - Stage: hardened prototype, pre-staging and pre-pilot. Do not claim industrial release readiness, completed company-data integrations, or top-market status.
 
+### Current unmerged continuation — 2026-10-10
+
+- Zoho create intake now writes a tenant-scoped local-lead-to-CRM-record binding atomically with the lead, audit, and dedupe marker. Identical replays backfill bindings for older records; the binding can be read consistently without a table scan or GSI propagation delay.
+- Verification for this continuation: focused webhook suite **25 passed**; full backend suite **187 passed**; `sam validate --template-file template.yaml --lint` passed. The GitHub PR/CodeQL gates remain pending. No OAuth token refresh or CRM writeback is implemented by this mapping change.
+
 LeadRescue AI is a technically substantial, pre-pilot prototype for rescuing inbound sales leads. It is designed to receive and triage leads, calculate deterministic priority and risk, generate a response draft, and let a human decide what happens. Its strongest architectural decision is: **AI understands; deterministic software decides; humans approve.**
 
 It is **not yet a market-ready industrial product**. Source code now includes an outbound WhatsApp attempt path, but there is no verified customer-like AWS deployment, real identity-provider sign-in, successful Bedrock invocation in the intended account/region, completed existing-data migration, live CRM write/read integration, verified Meta delivery, recovery drill, security/load evidence, or measured customer ROI. Those gaps are deployment and product evidence, not things a README or passing unit suite can prove.

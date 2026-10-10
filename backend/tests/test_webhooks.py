@@ -205,6 +205,7 @@ def test_zoho_ingest_authenticates_maps_and_uses_permanent_record_dedupe(monkeyp
     assert persisted["kwargs"] == {
         "permanent_idempotency": True,
         "source_modified_at": webhooks.ZohoLeadWebhook.model_validate_json(body).modified_at.isoformat(),
+        "source_record_id": "5725767000000123456",
     }
 
 
@@ -457,6 +458,7 @@ class _FakeTable:
     def __init__(self, name):
         self.name = name
         self.event = None
+        self.items = {}
 
     def get_item(self, Key, **_kwargs):
         if self.name == "test-suppressions":
@@ -464,13 +466,27 @@ class _FakeTable:
             if marker in {"migration", "history"}:
                 return {"Item": {"index_key_scheme": "hmac-sha256-v1", "index_key_id": "key-v1"}}
         if self.name == "test-events":
-            return {"Item": self.event} if self.event else {}
+            event_key = Key.get("event_key")
+            if self.event and self.event.get("event_key") == event_key:
+                return {"Item": self.event}
+            return {"Item": self.items[event_key]} if event_key in self.items else {}
         return {}
 
     def update_item(self, *, Key, ExpressionAttributeValues, **_kwargs):
         if self.name != "test-events" or not self.event or self.event.get("event_key") != Key["event_key"]:
             raise AssertionError("Unexpected fake event marker update")
-        self.event["source_modified_at"] = ExpressionAttributeValues[":source_time"]
+        if ":record_id" in ExpressionAttributeValues:
+            self.event["source_record_id"] = ExpressionAttributeValues[":record_id"]
+        if ":source_time" in ExpressionAttributeValues:
+            self.event["source_modified_at"] = ExpressionAttributeValues[":source_time"]
+
+    def put_item(self, *, Item, **_kwargs):
+        if self.name != "test-events":
+            raise AssertionError("Unexpected fake event item")
+        event_key = Item["event_key"]
+        if (self.event and self.event.get("event_key") == event_key) or event_key in self.items:
+            raise ClientError({"Error": {"Code": "ConditionalCheckFailedException", "Message": "already exists"}}, "PutItem")
+        self.items[event_key] = Item
 
 
 class _FakeDynamo:
@@ -542,13 +558,71 @@ def test_permanent_external_record_marker_does_not_expire(monkeypatch):
         "payload-digest",
         permanent_idempotency=True,
         source_modified_at="2026-10-10T12:00:00+00:00",
+        source_record_id="5725767000000123456",
     )
 
     marker = fake.transact_items[2]["Put"]["Item"]
     assert response.status_code == 201
     assert marker["provider"]["S"] == "zoho-crm"
     assert marker["source_modified_at"]["S"] == "2026-10-10T12:00:00+00:00"
+    assert marker["source_record_id"]["S"] == "5725767000000123456"
     assert "expires_at" not in marker
+    binding = fake.transact_items[3]["Put"]["Item"]
+    assert binding["event_key"]["S"] == f"tenant-test#zoho-binding#{lead.lead_id}"
+    assert binding["source_record_id"]["S"] == "5725767000000123456"
+
+
+def test_zoho_source_binding_uses_tenant_scoped_strong_key(monkeypatch):
+    expected_key = "tenant-test#zoho-binding#local-lead"
+
+    class BindingTable:
+        def get_item(self, *, Key, ConsistentRead):
+            assert Key == {"event_key": expected_key}
+            assert ConsistentRead is True
+            return {"Item": {
+                "event_key": expected_key,
+                "tenant_id": "tenant-test",
+                "provider": "zoho-crm",
+                "lead_id": "local-lead",
+                "source_record_id": "5725767000000123456",
+            }}
+
+    class Resource:
+        def Table(self, _name):
+            return BindingTable()
+
+    class TestSettings:
+        effective_tenant_id = "tenant-test"
+        processed_events_table = "test-events"
+
+    monkeypatch.setattr(zoho, "settings", TestSettings())
+    monkeypatch.setattr(zoho, "get_boto3_dynamodb_resource", Resource)
+    assert zoho.source_record_id_for_lead("local-lead") == "5725767000000123456"
+
+
+def test_zoho_source_binding_rejects_cross_tenant_or_malformed_records(monkeypatch):
+    class BindingTable:
+        def get_item(self, **_kwargs):
+            return {"Item": {
+                "tenant_id": "other-tenant",
+                "provider": "zoho-crm",
+                "lead_id": "local-lead",
+                "source_record_id": "5725767000000123456",
+            }}
+
+    class Resource:
+        def Table(self, _name):
+            return BindingTable()
+
+    class TestSettings:
+        effective_tenant_id = "tenant-test"
+        processed_events_table = "test-events"
+
+    monkeypatch.setattr(zoho, "settings", TestSettings())
+    monkeypatch.setattr(zoho, "get_boto3_dynamodb_resource", Resource)
+    with pytest.raises(HTTPException) as exc:
+        zoho.source_record_id_for_lead("local-lead")
+    assert exc.value.status_code == 503
 
 
 def test_zoho_replay_backfills_missing_source_version_only_for_identical_payload(monkeypatch):
@@ -574,11 +648,14 @@ def test_zoho_replay_backfills_missing_source_version_only_for_identical_payload
         digest,
         permanent_idempotency=True,
         source_modified_at="2026-10-10T12:00:00+00:00",
+        source_record_id="record-1",
     )
 
     assert response.status_code == 200
     assert json.loads(response.body)["duplicate"] is True
     assert event_marker.event["source_modified_at"] == "2026-10-10T12:00:00+00:00"
+    assert event_marker.event["source_record_id"] == "record-1"
+    assert event_marker.items["tenant-test#zoho-binding#existing-lead"]["source_record_id"] == "record-1"
 
 
 @pytest.mark.parametrize(

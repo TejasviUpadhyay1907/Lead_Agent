@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -92,6 +93,7 @@ def apply_lead_snapshot(payload: ZohoLeadUpdateWebhook, payload_digest: str) -> 
         existing.get("tenant_id") != settings.effective_tenant_id
         or existing.get("provider") != provider
         or not existing.get("lead_id")
+        or existing.get("source_record_id") not in {None, payload.record_id}
     ):
         raise HTTPException(status_code=503, detail="Zoho source-record binding is invalid")
 
@@ -293,6 +295,31 @@ def apply_lead_snapshot(payload: ZohoLeadUpdateWebhook, payload_digest: str) -> 
         status_code=status.HTTP_200_OK,
         content={"accepted": True, "updated": True, "lead_id": lead.lead_id, "changed_fields": changed_fields},
     )
+
+
+def source_record_id_for_lead(lead_id: str) -> Optional[str]:
+    """Return the durable Zoho record binding for a tenant-owned local lead."""
+    dynamodb = get_boto3_dynamodb_resource()
+    if not dynamodb:
+        raise HTTPException(status_code=503, detail="Lead storage is unavailable")
+    binding_key = f"{settings.effective_tenant_id}#zoho-binding#{lead_id}"
+    item = consistent_item(
+        dynamodb.Table(settings.processed_events_table),
+        {"event_key": binding_key},
+        "Could not read Zoho source-record binding",
+    )
+    if not item:
+        return None
+    record_id = item.get("source_record_id")
+    if (
+        item.get("tenant_id") != settings.effective_tenant_id
+        or item.get("provider") != "zoho-crm"
+        or item.get("lead_id") != lead_id
+        or not isinstance(record_id, str)
+        or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", record_id)
+    ):
+        raise HTTPException(status_code=503, detail="Zoho source-record binding is invalid")
+    return record_id
 
 
 def _next_updated_at(previous: str) -> str:

@@ -175,6 +175,7 @@ def _create_or_return_duplicate(
     *,
     permanent_idempotency: bool = False,
     source_modified_at: Optional[str] = None,
+    source_record_id: Optional[str] = None,
 ) -> JSONResponse:
     dynamodb = get_boto3_dynamodb_resource()
     if not dynamodb:
@@ -215,6 +216,8 @@ def _create_or_return_duplicate(
         "status": "COMPLETED",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if provider == "zoho-crm" and source_record_id:
+        marker["source_record_id"] = source_record_id
     if source_modified_at:
         marker["source_modified_at"] = source_modified_at
     if not permanent_idempotency:
@@ -254,6 +257,21 @@ def _create_or_return_duplicate(
                         "ConditionExpression": "attribute_not_exists(event_key)",
                     }
                 },
+                *([{
+                    "Put": {
+                        "TableName": settings.processed_events_table,
+                        "Item": _serialize({
+                            "event_key": f"{settings.effective_tenant_id}#zoho-binding#{lead.lead_id}",
+                            "tenant_id": settings.effective_tenant_id,
+                            "provider": "zoho-crm",
+                            "lead_id": lead.lead_id,
+                            "source_record_id": source_record_id,
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            "status": "SOURCE_BINDING",
+                        }),
+                        "ConditionExpression": "attribute_not_exists(event_key)",
+                    }
+                }] if provider == "zoho-crm" and source_record_id else []),
                 *_suppression_transaction_items(lead),
             ]
         )
@@ -276,6 +294,53 @@ def _create_or_return_duplicate(
                     raise HTTPException(status_code=409, detail="Idempotency key was already used for a different payload")
                 if existing.get("provider") != provider or not existing.get("lead_id"):
                     raise HTTPException(status_code=503, detail="Stored webhook idempotency state is invalid")
+                if provider == "zoho-crm" and source_record_id:
+                    if existing.get("source_record_id") not in {None, source_record_id}:
+                        raise HTTPException(status_code=503, detail="Stored Zoho source-record binding is invalid")
+                    if not existing.get("source_record_id"):
+                        try:
+                            events_table.update_item(
+                                Key={"event_key": event_key},
+                                UpdateExpression="SET source_record_id = :record_id",
+                                ConditionExpression=(
+                                    "attribute_exists(event_key) AND tenant_id = :tenant AND provider = :provider "
+                                    "AND payload_digest = :payload_digest AND attribute_not_exists(source_record_id)"
+                                ),
+                                ExpressionAttributeValues={
+                                    ":record_id": source_record_id,
+                                    ":tenant": settings.effective_tenant_id,
+                                    ":provider": provider,
+                                    ":payload_digest": payload_digest,
+                                },
+                            )
+                        except ClientError as migration_error:
+                            if migration_error.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                                raise HTTPException(status_code=503, detail="Could not backfill Zoho source-record binding") from migration_error
+                            raise HTTPException(status_code=409, detail="Zoho record changed during source-binding backfill; retry the latest snapshot") from migration_error
+                        except BotoCoreError as migration_error:
+                            raise HTTPException(status_code=503, detail="Could not backfill Zoho source-record binding") from migration_error
+                    binding_key = f"{settings.effective_tenant_id}#zoho-binding#{existing['lead_id']}"
+                    try:
+                        events_table.put_item(
+                            Item={
+                                "event_key": binding_key,
+                                "tenant_id": settings.effective_tenant_id,
+                                "provider": "zoho-crm",
+                                "lead_id": existing["lead_id"],
+                                "source_record_id": source_record_id,
+                                "created_at": existing.get("created_at") or datetime.now(timezone.utc).isoformat(),
+                                "status": "SOURCE_BINDING",
+                            },
+                            ConditionExpression="attribute_not_exists(event_key)",
+                        )
+                    except ClientError as binding_error:
+                        if binding_error.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                            raise HTTPException(status_code=503, detail="Could not persist Zoho source-record binding") from binding_error
+                        binding = events_table.get_item(Key={"event_key": binding_key}, ConsistentRead=True).get("Item")
+                        if not binding or binding.get("source_record_id") != source_record_id or binding.get("tenant_id") != settings.effective_tenant_id:
+                            raise HTTPException(status_code=503, detail="Stored Zoho lead binding is invalid") from binding_error
+                    except BotoCoreError as binding_error:
+                        raise HTTPException(status_code=503, detail="Could not persist Zoho source-record binding") from binding_error
                 if provider == "zoho-crm" and source_modified_at and not existing.get("source_modified_at"):
                     try:
                         events_table.update_item(
@@ -453,6 +518,7 @@ async def ingest_zoho_lead(
         privacy_record,
         permanent_idempotency=True,
         source_modified_at=payload.modified_at.isoformat() if payload.modified_at else None,
+        source_record_id=payload.record_id,
     )
 
 

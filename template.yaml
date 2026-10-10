@@ -261,8 +261,7 @@ Resources:
                 - !GetAtt WhatsAppMessagesTable.Arn
         - Statement:
             - Effect: Allow
-              Action:
-                - dynamodb:GetItem
+              Action: [dynamodb:GetItem, dynamodb:UpdateItem]
               Resource: !GetAtt ProcessedEventsTable.Arn
         - Statement:
             - Effect: Allow
