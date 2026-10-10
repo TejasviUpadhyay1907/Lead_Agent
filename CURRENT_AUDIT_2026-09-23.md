@@ -30,14 +30,14 @@
 
 ### Latest verified state — 2026-10-10
 
-- The latest code change on `main` is `8e0e5ea` (PR #6), after Zoho snapshot reconciliation in `280aeb6` (PR #4) and its audit refresh in `e37b641` (PR #5). The subsequent audit-only refresh is PR #7. Required PR checks passed, including backend/SAM, frontend production build, JavaScript/TypeScript and Python CodeQL analyses, and CodeQL status. The code baseline was locally verified with **185 backend tests**, frontend production build, Python compile, SAM validation, and npm dependency audit (`0` vulnerabilities); PR #6 additionally passed the backend/SAM and frontend/CodeQL gates. Webhook secret-load failures now return a controlled HTTP 503 and log only the exception class.
+- The latest code change on `main` is `1abeecd` (PR #9), after webhook secret-failure hardening in PR #6. PRs #7 and #8 refreshed the audit. Required PR checks passed, including backend/SAM, frontend production build, JavaScript/TypeScript and Python CodeQL analyses, and CodeQL status. PR #9 was locally verified with **187 backend tests**, SAM validation, and diff checks; all required GitHub checks also passed. PR #6 changed webhook secret-load failures to return controlled HTTP 503 responses and log only exception class names.
 - Pilot candidate selected for planning: Zoho CRM + Meta WhatsApp Business Platform for an India-based SMB. Zoho now has create intake plus versioned complete-snapshot edit reconciliation; OAuth connection lifecycle and CRM writeback are not implemented. Meta send/callback code has not been exercised against a vendor sandbox. AWS staging remains unverified; the local AWS CLI session expired.
 - Stage: hardened prototype, pre-staging and pre-pilot. Do not claim industrial release readiness, completed company-data integrations, or top-market status.
 
-### Current unmerged continuation — 2026-10-10
+### Continuation — tenant-scoped Zoho source binding, 2026-10-10
 
 - Zoho create intake now writes a tenant-scoped local-lead-to-CRM-record binding atomically with the lead, audit, and dedupe marker. Identical replays backfill bindings for older records; the binding can be read consistently without a table scan or GSI propagation delay.
-- Verification for this continuation: focused webhook suite **25 passed**; full backend suite **187 passed**; `sam validate --template-file template.yaml --lint` passed. The GitHub PR/CodeQL gates remain pending. No OAuth token refresh or CRM writeback is implemented by this mapping change.
+- Verification: focused webhook suite **25 passed**; full backend suite **187 passed**; `sam validate --template-file template.yaml --lint` passed; all required PR #9 GitHub/CodeQL checks passed. No OAuth token refresh or CRM writeback is implemented by this mapping change.
 
 LeadRescue AI is a technically substantial, pre-pilot prototype for rescuing inbound sales leads. It is designed to receive and triage leads, calculate deterministic priority and risk, generate a response draft, and let a human decide what happens. Its strongest architectural decision is: **AI understands; deterministic software decides; humans approve.**
 
